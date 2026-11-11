@@ -4,13 +4,41 @@
 
 **여행은 한눈에, 작성은 간단하게.**
 
-기존 Notion 플러그인으로 여행 플래너를 만들고 계획을 수정하는 스킬이에요. 사진·카드·색상으로 보기 좋게 정리하고, 작성할 때는 필요한 항목만 보여줘요.
+Notion 연결을 사용해 여행 플래너를 만들고 계획을 수정하는 **Codex·ChatGPT용 플러그인/스킬**이에요. 사진·카드·색상으로 보기 좋게 정리하고, 작성할 때는 필요한 항목만 보여줘요.
 
 ## 처음 설치하기
 
-Souvenir는 별도 프로그램이 아니라 **Codex에서 불러 쓰는 여행 도우미 스킬**이에요. Python, TypeScript, npm 설치는 필요하지 않아요.
+Souvenir는 별도 프로그램이 아니라 **플러그인으로 설치하거나 Codex 프로젝트에서 바로 불러 쓰는 여행 도우미**예요. Python, TypeScript, npm 설치는 필요하지 않아요.
 
-### 1. 저장소 받기
+가장 쉬운 방법은 플러그인 설치예요. 플러그인을 설치할 수 없는 환경에서는 저장소를 직접 열어도 같은 스킬을 사용할 수 있어요.
+
+### 방법 A · 플러그인으로 설치하기 (권장)
+
+#### Codex CLI에서 마켓플레이스 등록
+
+Codex CLI를 사용한다면 다음 명령으로 Souvenir 마켓플레이스를 등록해요.
+
+```bash
+codex plugin marketplace add Jaws8078/souvenir --ref main
+```
+
+등록 후 Codex 데스크톱의 Plugins Directory에서 **Souvenir 여행 도우미**를 설치하고 새 채팅을 시작해요.
+
+#### ChatGPT 데스크톱에서 설치
+
+1. Plugins Directory를 열어요.
+2. `Add Marketplace` 또는 `Add from repository`를 선택해요.
+3. `https://github.com/Jaws8078/souvenir`를 입력하고 동기화해요.
+4. **Souvenir**를 설치하고 새 채팅을 시작해요.
+5. Notion 연결을 완료한 뒤 `$souvenir` 또는 표시되는 시작 문구를 사용해요.
+
+플러그인은 스킬·내장 템플릿·시작 문구를 묶어 설치하지만, Notion 계정과 워크스페이스 권한은 각 사용자가 별도로 연결해야 해요.
+
+### 방법 B · 저장소를 직접 열기
+
+플러그인 설치가 표시되지 않는 환경에서는 아래 방식으로 사용해요.
+
+#### 1. 저장소 받기
 
 Git이 있다면 터미널에서 실행해요.
 
@@ -21,15 +49,15 @@ cd souvenir
 
 Git을 처음 쓰거나 설치할 수 없다면 GitHub의 **Code → Download ZIP**으로 받아 압축을 풀어도 돼요. 다만 ZIP 방식은 업데이트할 때 다시 내려받아야 하므로 Git clone을 권장해요.
 
-### 2. Codex에서 폴더 열기
+#### 2. Codex에서 폴더 열기
 
 Codex에서 방금 받은 `souvenir` 폴더를 프로젝트로 열어요. 저장소 안의 `.agents/skills/souvenir/SKILL.md`를 통해 스킬이 자동으로 검색돼요. 인식이 늦으면 폴더를 닫았다가 다시 열거나 새 채팅을 시작해요.
 
-### 3. Notion 연결하기
+#### 3. Notion 연결하기
 
 Codex에서 Notion 플러그인을 연결하고, 템플릿을 만들 워크스페이스에 접근 권한을 줘요. 첫 설치에는 페이지와 데이터베이스를 만들 수 있는 쓰기 권한이 필요해요.
 
-### 4. 첫 실행
+#### 4. 첫 실행
 
 새 채팅에서 아래처럼 입력해요.
 
@@ -58,30 +86,6 @@ $souvenir 새 여행 계획. 후쿠오카 3박 4일
 ```
 
 설치 기록이 있으면 기존 구조를 재사용하고, 사용자가 별도 템플릿 링크를 주면 그 템플릿을 우선해요.
-
-## 플러그인처럼 설치하기
-
-이 저장소에는 Codex·ChatGPT 데스크톱에서 설치할 수 있는 플러그인 매니페스트와 저장소 마켓플레이스 설정도 들어 있어요. 플러그인은 스킬과 안내 문구를 묶어 설치하지만, Notion 계정·워크스페이스 권한은 각 사용자가 별도로 연결해야 해요.
-
-### Codex CLI에서 마켓플레이스 추가
-
-Codex CLI를 사용한다면 다음 명령으로 저장소 마켓플레이스를 등록할 수 있어요.
-
-```bash
-codex plugin marketplace add Jaws8078/souvenir --ref main
-```
-
-그 다음 Codex 데스크톱의 Plugins Directory에서 **Souvenir 여행 도우미**를 찾아 설치하고, 새 채팅을 시작해요. [공식 플러그인 패키징 문서](https://developers.openai.com/plugins/build/plugins)의 로컬 마켓플레이스 흐름에 따라 저장소의 `.agents/plugins/marketplace.json`이 `plugin.json`을 가리켜요.
-
-### ChatGPT 데스크톱에서 설치
-
-1. Plugins Directory를 열어요.
-2. `Add Marketplace` 또는 `Add from repository`를 선택해요.
-3. `https://github.com/Jaws8078/souvenir`를 입력하고 동기화해요.
-4. **Souvenir**를 설치한 뒤 새 채팅을 시작해요.
-5. Notion 연결을 완료하고 `$souvenir` 또는 플러그인이 제공하는 시작 문구를 사용해요.
-
-플러그인 설치가 표시되지 않는 환경에서는 기존처럼 GitHub 저장소를 clone하고 Codex에서 프로젝트 폴더를 열면 `.agents/skills/souvenir`가 로컬 스킬로 작동해요. `skills/souvenir`는 플러그인 패키지용 경로이고, 두 경로의 내용은 함께 유지해요.
 
 ## 업데이트하기
 
@@ -172,6 +176,6 @@ Souvenir의 기본 양식은 특정 Notion 페이지 링크를 꼭 필요로 하
 - 저장된 레이아웃, 입력 구역의 속성 유형, 여행·취소·제외 필터를 다시 확인했어요. 실제 앱·모바일 렌더링 검수는 남아 있어요.
 - 환율·날씨·운영 정보는 자동 조회되지 않아요. 미확인 정보는 확인 필요로 남겨요.
 - 무료 환경을 고려해 네이티브 차트는 새로 만들지 않아요. 이전 예산 DB의 차트 탭 1개는 삭제 도구/앱 입력 문제로 남아 있어요.
-- 다른 워크스페이스의 템플릿 설치·복제와 클릭형 시작 메뉴는 별도 검증이 필요해요. 현재는 번호·작업 이름으로 시작해요.
+- 플러그인 매니페스트·저장소 마켓플레이스·세 개의 시작 문구를 추가했어요. 실제 ChatGPT/Codex 데스크톱의 표시 위치와 클릭 후 동작은 설치 환경에서 한 번 더 확인해야 해요.
 
 Python·TypeScript·새 의존성은 추가하지 않았어요. 기존 구현·계산 검증·남은 제약은 [구현 기록](docs/implementation-notes.md)에 보존했어요. 스킬 규칙은 [SKILL.md](.agents/skills/souvenir/SKILL.md), 입력 설계는 [간편 입력 규칙](.agents/skills/souvenir/references/input-design.md)에서 볼 수 있어요.
