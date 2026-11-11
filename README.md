@@ -59,6 +59,30 @@ $souvenir 새 여행 계획. 후쿠오카 3박 4일
 
 설치 기록이 있으면 기존 구조를 재사용하고, 사용자가 별도 템플릿 링크를 주면 그 템플릿을 우선해요.
 
+## 플러그인처럼 설치하기
+
+이 저장소에는 Codex·ChatGPT 데스크톱에서 설치할 수 있는 플러그인 매니페스트와 저장소 마켓플레이스 설정도 들어 있어요. 플러그인은 스킬과 안내 문구를 묶어 설치하지만, Notion 계정·워크스페이스 권한은 각 사용자가 별도로 연결해야 해요.
+
+### Codex CLI에서 마켓플레이스 추가
+
+Codex CLI를 사용한다면 다음 명령으로 저장소 마켓플레이스를 등록할 수 있어요.
+
+```bash
+codex plugin marketplace add Jaws8078/souvenir --ref main
+```
+
+그 다음 Codex 데스크톱의 Plugins Directory에서 **Souvenir 여행 도우미**를 찾아 설치하고, 새 채팅을 시작해요. [공식 플러그인 패키징 문서](https://developers.openai.com/plugins/build/plugins)의 로컬 마켓플레이스 흐름에 따라 저장소의 `.agents/plugins/marketplace.json`이 `plugin.json`을 가리켜요.
+
+### ChatGPT 데스크톱에서 설치
+
+1. Plugins Directory를 열어요.
+2. `Add Marketplace` 또는 `Add from repository`를 선택해요.
+3. `https://github.com/Jaws8078/souvenir`를 입력하고 동기화해요.
+4. **Souvenir**를 설치한 뒤 새 채팅을 시작해요.
+5. Notion 연결을 완료하고 `$souvenir` 또는 플러그인이 제공하는 시작 문구를 사용해요.
+
+플러그인 설치가 표시되지 않는 환경에서는 기존처럼 GitHub 저장소를 clone하고 Codex에서 프로젝트 폴더를 열면 `.agents/skills/souvenir`가 로컬 스킬로 작동해요. `skills/souvenir`는 플러그인 패키지용 경로이고, 두 경로의 내용은 함께 유지해요.
+
 ## 업데이트하기
 
 Git clone으로 설치했다면 저장소 폴더에서 실행해요.
