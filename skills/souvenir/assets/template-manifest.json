@@ -18,19 +18,54 @@
       "role": "home",
       "sections": [
         { "kind": "callout", "icon": "🧭", "color": "gray_background", "title": "여행 계획 진행도", "body": "등록한 일정·예약·할 일·준비물의 완료 상태를 한 줄로 확인해요. 자동 계산을 기본으로 하되 여행 카드에서 직접 완료·자동 제외를 조정할 수 있어요." },
-        { "kind": "heading", "text": "이번 여행 한눈에" },
-        { "kind": "links", "title": "D-Day · 숙소 · 여행 지갑", "targets": ["trip", "stay", "wallet"] },
-        { "kind": "heading", "text": "오늘과 다음 일정" },
-        { "kind": "links", "title": "오늘 · 다음 일정", "targets": ["itinerary"] },
-        { "kind": "heading", "text": "여행 바로가기" },
-        { "kind": "links", "title": "네 묶음", "targets": ["planning", "transport", "budget", "prep"] }
+        { "kind": "callout", "icon": "🧭", "color": "green_background", "title": "여행 중 확인 존", "body": "여행 중에는 오늘 일정·다음 일정·숙소·예약·지갑 잔액을 먼저 확인해요. 입력 속성은 숨기고, 계획을 바꿀 때만 계획 존으로 이동합니다." },
+        { "kind": "links", "title": "여행 중 바로 확인", "targets": ["travel_view"] },
+        { "kind": "callout", "icon": "🛠️", "color": "blue_background", "title": "계획 존 · 작성·수정", "body": "출발 전 일정·장소·이동·예약·예산·준비물을 작성하고 수정하는 공간이에요. 여행 중에는 이 영역을 잠그고 확인 존만 사용하세요." },
+        { "kind": "links", "title": "계획·수정 허브", "targets": ["planning_zone"] }
       ]
+    },
+    {
+      "key": "planning_zone",
+      "title": "🛠️ 계획 존 · 작성·수정",
+      "icon": "🛠️",
+      "parent": "dashboard",
+      "role": "planning_zone",
+      "color": "blue_background",
+      "children": ["planning", "transport", "budget", "prep"],
+      "edit_mode": true
+    },
+    {
+      "key": "travel_view",
+      "title": "🧭 여행 중 확인 존",
+      "icon": "🧭",
+      "parent": "dashboard",
+      "role": "travel_mode",
+      "color": "green_background",
+      "read_only_intent": true,
+      "page_lock_recommended": true,
+      "database_keys": ["itinerary", "reservation", "stay", "wallet", "expense", "material"],
+      "cards": [
+        { "title": "☀️ 오늘 일정", "database_key": "itinerary", "view": "오늘 일정", "color": "yellow_background" },
+        { "title": "⏭️ 다음 일정", "database_key": "itinerary", "view": "다음 일정", "color": "blue_background" },
+        { "title": "🏨 숙소 확인", "database_key": "stay", "view": "확정 숙소", "color": "green_background" },
+        { "title": "🎫 예약·확인서", "database_key": "reservation", "view": "예약 현황", "color": "purple_background" },
+        { "title": "💴 지갑 잔액", "database_key": "wallet", "view": "지갑 카드", "color": "brown_background" },
+        { "title": "📚 중요 자료", "database_key": "material", "view": "중요 자료", "color": "orange_background" }
+      ],
+      "visible_properties": {
+        "itinerary": ["일정", "일차", "시작", "종료", "장소", "상태"],
+        "reservation": ["예약", "예약 대상", "이용 일시", "예약 상태", "확인 링크"],
+        "stay": ["숙소", "주소", "체크인", "체크아웃", "숙소 상태", "지도 URL"],
+        "wallet": ["지갑", "통화", "남은 금액", "사용률"],
+        "expense": ["내역", "사용처", "거래 유형", "금액"],
+        "material": ["자료", "자료 종류", "링크", "상태"]
+      }
     },
     {
       "key": "planning",
       "title": "🗺️ 계획·장소",
       "icon": "🗺️",
-      "parent": "dashboard",
+      "parent": "planning_zone",
       "role": "group",
       "color": "blue_background",
       "database_keys": ["trip", "itinerary", "place", "weather", "schedule_check"]
@@ -39,7 +74,7 @@
       "key": "transport",
       "title": "🎫 이동·예약",
       "icon": "🎫",
-      "parent": "dashboard",
+      "parent": "planning_zone",
       "role": "group",
       "color": "green_background",
       "database_keys": ["long_transport", "local_transport", "transport_service", "stay", "reservation"]
@@ -48,7 +83,7 @@
       "key": "budget",
       "title": "💴 예산·동행",
       "icon": "💴",
-      "parent": "dashboard",
+      "parent": "planning_zone",
       "role": "group",
       "color": "brown_background",
       "database_keys": ["wallet", "budget", "expense", "traveler", "split", "settlement", "decision"]
@@ -57,7 +92,7 @@
       "key": "prep",
       "title": "🎒 준비·자료",
       "icon": "🎒",
-      "parent": "dashboard",
+      "parent": "planning_zone",
       "role": "group",
       "color": "orange_background",
       "database_keys": ["task", "packing", "material"]
@@ -72,7 +107,7 @@
   ],
   "databases": [
     { "key": "trip", "title": "✈️ Souvenir · 여행", "parent": "planning", "title_property": "여행", "properties": [
-      { "name": "목적지", "type": "rich_text", "input": true }, { "name": "여행 기간", "type": "date", "input": true }, { "name": "인원", "type": "number", "input": true }, { "name": "기준 통화", "type": "select", "options": ["KRW", "JPY", "USD", "EUR"], "input": true }, { "name": "진행도 수동 완료", "type": "checkbox", "input": true }, { "name": "자동 제외", "type": "checkbox", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
+      { "name": "목적지", "type": "rich_text", "input": true }, { "name": "여행 기간", "type": "date", "input": true }, { "name": "여행 상태", "type": "select", "options": ["계획 중", "여행 중", "완료"], "input": true }, { "name": "인원", "type": "number", "input": true }, { "name": "기준 통화", "type": "select", "options": ["KRW", "JPY", "USD", "EUR"], "input": true }, { "name": "진행도 수동 완료", "type": "checkbox", "input": true }, { "name": "자동 제외", "type": "checkbox", "input": true }, { "name": "계획 수정 잠금", "type": "checkbox", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
     ], "views": ["여행 카드", "진행도 상세", "모바일 목록"] },
     { "key": "itinerary", "title": "🗓️ Souvenir · 일정", "parent": "planning", "title_property": "일정", "properties": [
       { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "일차", "type": "number", "input": true }, { "name": "날짜", "type": "date", "input": true }, { "name": "시작", "type": "date", "input": true }, { "name": "종료", "type": "date", "input": true }, { "name": "장소", "type": "rich_text", "input": true }, { "name": "상태", "type": "select", "options": ["계획", "진행 중", "완료", "취소", "건너뜀"], "input": true }, { "name": "플랜 B", "type": "rich_text", "input": true }, { "name": "플랜 C", "type": "rich_text", "input": true }

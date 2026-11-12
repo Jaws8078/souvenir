@@ -173,3 +173,9 @@ Notion 플러그인에 연결해 여행 플래너를 만들고, 새 여행을 �
 공식 문서에는 시작 문구를 최대 세 개 등록하는 `defaultPrompt`가 있어요. 현재 형식에서는 루트 `plugin.json`의 `extensions.com.openai.interface.defaultPrompt`에 두며, 호환 형식은 `.codex-plugin/plugin.json`의 `interface.defaultPrompt`예요. 문구는 각각 128자 이내이며 앱 `@mention`은 넣지 않아요. ([패키지 형식](https://developers.openai.com/plugins/build/plugins), [필드 규격](https://developers.openai.com/plugins/deploy/submission))
 
 후보 문구는 `Souvenir로 여행 플래너 만들기`, `Souvenir로 새 여행 계획`, `Souvenir로 기존 일정 수정`이에요. 실제 Codex·ChatGPT 화면의 표시 위치, 클릭 시 입력창 채움 또는 즉시 전송 여부, 기존 Notion 플러그인과의 연동은 별도 설치 테스트가 필요해요. 아직 보조 플러그인은 추가하지 않았어요. 표시되지 않는 환경에서도 기존 번호·작업 이름 입력을 유지해요.
+
+## 계획 존·여행 중 확인 존 분리 (2026-11-12)
+
+기본 템플릿을 출발 전 작성과 여행 중 확인으로 나눴어요. 홈은 `진행도 히어로 → 여행 중 확인 존 → 계획 존` 순서이며, 계획 존 아래에 계획·장소 / 이동·예약 / 예산·동행 / 준비·자료 네 묶음을 배치해요. 확인 존에는 오늘·다음 일정, 확정 예약, 숙소, 지갑 잔액, 중요 자료만 한 열 카드·목록으로 보여주고 입력·내부 계산 속성은 숨겨요.
+
+확인 존은 Notion 연결 데이터베이스의 표시용 화면이므로 모든 행을 기술적으로 강제 읽기 전용으로 만들 수 있다고 설명하지 않아요. 여행 시작 시 페이지 잠금을 권장하고, Souvenir는 사용자가 `계획 수정`이라고 명시하지 않는 한 일정·예약·예산을 변경하지 않아요. 코드 설치기 매니페스트에는 `planning_zone`·`travel_mode` 페이지, 확인 존에 표시할 속성 목록, 페이지 잠금 권장 상태를 추가했어요.

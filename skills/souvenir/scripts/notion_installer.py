@@ -345,13 +345,37 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
                         dashboard_blocks.append(link_block(mapping["databases"][target], "database_id"))
         client.append_blocks(mapping["pages"]["dashboard"], dashboard_blocks)
 
+        database_titles = {database["key"]: database["title"] for database in manifest["databases"]}
         for page in manifest["pages"]:
-            if page.get("role") != "group":
-                continue
-            blocks: List[Dict[str, Any]] = [callout_block(page["title"], "입력 항목은 먼저 작성하고, 자동 결과·보조 속성은 상세 화면에서 확인하세요.", page.get("icon", "🗂️"), page.get("color", "gray_background"))]
-            for key in page.get("database_keys", []):
-                blocks.append(link_block(mapping["databases"][key], "database_id"))
-            client.append_blocks(mapping["pages"][page["key"]], blocks)
+            role = page.get("role")
+            if role == "group":
+                blocks: List[Dict[str, Any]] = [callout_block(page["title"], "입력 항목은 먼저 작성하고, 자동 결과·보조 속성은 상세 화면에서 확인하세요.", page.get("icon", "🗂️"), page.get("color", "gray_background"))]
+                for key in page.get("database_keys", []):
+                    blocks.append(link_block(mapping["databases"][key], "database_id"))
+                client.append_blocks(mapping["pages"][page["key"]], blocks)
+            elif role == "planning_zone":
+                blocks = [callout_block(page["title"], "출발 전 작성·수정 공간입니다. 여행 중에는 확인 존을 먼저 보고, 계획을 바꿀 때만 이곳으로 들어오세요.", page.get("icon", "🛠️"), page.get("color", "blue_background"))]
+                for child in page.get("children", []):
+                    if child in mapping["pages"]:
+                        blocks.append(link_block(mapping["pages"][child], "page_id"))
+                client.append_blocks(mapping["pages"][page["key"]], blocks)
+            elif role == "travel_mode":
+                blocks = [callout_block(page["title"], "여행 중 확인용 화면입니다. 계획을 수정하지 않을 때는 이 페이지를 잠가 두고 오늘 일정·예약·숙소·지갑만 확인하세요.", page.get("icon", "🧭"), page.get("color", "green_background"))]
+                cards = page.get("cards", [])
+                if cards:
+                    for card in cards:
+                        key = card["database_key"]
+                        view_name = card.get("view", "확인 보기")
+                        blocks.append(callout_block(card["title"], f"{view_name} · 입력 속성 숨김", card.get("icon", "🔎"), card.get("color", "gray_background")))
+                        blocks.append(link_block(mapping["databases"][key], "database_id"))
+                else:
+                    for key in page.get("database_keys", []):
+                        blocks.append(text_block(database_titles.get(key, key), "paragraph"))
+                        blocks.append(link_block(mapping["databases"][key], "database_id"))
+                        visible = page.get("visible_properties", {}).get(key, [])
+                        if visible:
+                            blocks.append(text_block("확인 표시: " + " · ".join(visible), "paragraph"))
+                client.append_blocks(mapping["pages"][page["key"]], blocks)
         mapping["content_rendered"] = True
 
     log_id = mapping["pages"].get("install_log")
