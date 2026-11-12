@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Install the portable Souvenir template with the official Notion API.
 
-This is a dependency-free fallback for environments where the Notion connector
-cannot duplicate a page across workspaces. It never reads or writes the private
-reference page. The checked-in manifest contains only names, layout intent, and
-property definitions; the target page/database IDs are generated at install
-time and saved in a local mapping file.
+This is a dependency-free fallback for environments where the Notion Marketplace
+template cannot be duplicated. The Marketplace/Notion template is the canonical
+source of truth for design. This script never reads or writes the private
+reference page. The checked-in manifest is only a sanitized fallback snapshot;
+target page/database IDs are generated at install time and saved in a local
+mapping file.
 
 The highest-fidelity route is still Notion's own Duplicate action on a public
 template link. Use this installer when a link is unavailable or when a local,
@@ -274,7 +275,7 @@ def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "notes": [
             "원본 Notion 페이지·ID·사용자 데이터는 읽지 않습니다.",
-            "Notion의 공식 Duplicate가 가능한 링크가 있으면 그 경로가 더 높은 충실도를 제공합니다.",
+            "Notion Marketplace 템플릿이 주 원본이며, 공개·복제 가능한 링크가 있으면 반드시 그 경로를 먼저 사용하세요.",
             "코드 재구축에서는 데이터베이스 구조를 만들고 뷰 이름을 안내합니다. 뷰의 실제 배치·관계·수식은 Souvenir 스킬 또는 Notion에서 후속 구성합니다.",
         ],
     }

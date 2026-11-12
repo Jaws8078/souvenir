@@ -2,10 +2,13 @@
   "schema_version": 1,
   "template_key": "souvenir-default",
   "display_name": "Souvenir · 여행 대시보드",
-  "source_policy": "sanitized_blueprint",
+  "source_policy": "fallback_snapshot",
+  "source_of_truth": "notion_marketplace_template",
+  "manifest_role": "link_unavailable_fallback",
   "original_page_ids_included": false,
   "distribution": {
     "public_template_url_env": "SOUVENIR_TEMPLATE_URL",
+    "primary_route": "notion_marketplace_duplicate",
     "duplicate_requires_user_approval": true,
     "code_rebuild_is_fallback": true
   },
