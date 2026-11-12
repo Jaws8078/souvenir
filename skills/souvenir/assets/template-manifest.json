@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "template_key": "souvenir-default",
+  "display_name": "Souvenir · 여행 대시보드",
+  "source_policy": "sanitized_blueprint",
+  "original_page_ids_included": false,
+  "distribution": {
+    "public_template_url_env": "SOUVENIR_TEMPLATE_URL",
+    "duplicate_requires_user_approval": true,
+    "code_rebuild_is_fallback": true
+  },
+  "pages": [
+    {
+      "key": "dashboard",
+      "title": "🧳 Souvenir · 여행 대시보드",
+      "icon": "🧳",
+      "parent": "target",
+      "role": "home",
+      "sections": [
+        { "kind": "callout", "icon": "🧭", "color": "gray_background", "title": "여행 계획 진행도", "body": "등록한 일정·예약·할 일·준비물의 완료 상태를 한 줄로 확인해요. 자동 계산을 기본으로 하되 여행 카드에서 직접 완료·자동 제외를 조정할 수 있어요." },
+        { "kind": "heading", "text": "이번 여행 한눈에" },
+        { "kind": "links", "title": "D-Day · 숙소 · 여행 지갑", "targets": ["trip", "stay", "wallet"] },
+        { "kind": "heading", "text": "오늘과 다음 일정" },
+        { "kind": "links", "title": "오늘 · 다음 일정", "targets": ["itinerary"] },
+        { "kind": "heading", "text": "여행 바로가기" },
+        { "kind": "links", "title": "네 묶음", "targets": ["planning", "transport", "budget", "prep"] }
+      ]
+    },
+    {
+      "key": "planning",
+      "title": "🗺️ 계획·장소",
+      "icon": "🗺️",
+      "parent": "dashboard",
+      "role": "group",
+      "color": "blue_background",
+      "database_keys": ["trip", "itinerary", "place", "weather", "schedule_check"]
+    },
+    {
+      "key": "transport",
+      "title": "🎫 이동·예약",
+      "icon": "🎫",
+      "parent": "dashboard",
+      "role": "group",
+      "color": "green_background",
+      "database_keys": ["long_transport", "local_transport", "transport_service", "stay", "reservation"]
+    },
+    {
+      "key": "budget",
+      "title": "💴 예산·동행",
+      "icon": "💴",
+      "parent": "dashboard",
+      "role": "group",
+      "color": "brown_background",
+      "database_keys": ["wallet", "budget", "expense", "traveler", "split", "settlement", "decision"]
+    },
+    {
+      "key": "prep",
+      "title": "🎒 준비·자료",
+      "icon": "🎒",
+      "parent": "dashboard",
+      "role": "group",
+      "color": "orange_background",
+      "database_keys": ["task", "packing", "material"]
+    },
+    {
+      "key": "install_log",
+      "title": "Souvenir · 설치 기록",
+      "icon": "🧩",
+      "parent": "dashboard",
+      "role": "internal"
+    }
+  ],
+  "databases": [
+    { "key": "trip", "title": "✈️ Souvenir · 여행", "parent": "planning", "title_property": "여행", "properties": [
+      { "name": "목적지", "type": "rich_text", "input": true }, { "name": "여행 기간", "type": "date", "input": true }, { "name": "인원", "type": "number", "input": true }, { "name": "기준 통화", "type": "select", "options": ["KRW", "JPY", "USD", "EUR"], "input": true }, { "name": "진행도 수동 완료", "type": "checkbox", "input": true }, { "name": "자동 제외", "type": "checkbox", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
+    ], "views": ["여행 카드", "진행도 상세", "모바일 목록"] },
+    { "key": "itinerary", "title": "🗓️ Souvenir · 일정", "parent": "planning", "title_property": "일정", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "일차", "type": "number", "input": true }, { "name": "날짜", "type": "date", "input": true }, { "name": "시작", "type": "date", "input": true }, { "name": "종료", "type": "date", "input": true }, { "name": "장소", "type": "rich_text", "input": true }, { "name": "상태", "type": "select", "options": ["계획", "진행 중", "완료", "취소", "건너뜀"], "input": true }, { "name": "플랜 B", "type": "rich_text", "input": true }, { "name": "플랜 C", "type": "rich_text", "input": true }
+    ], "views": ["일별 일정", "일차별 보드", "달력", "시간표", "모바일 목록"] },
+    { "key": "place", "title": "🗺️ Souvenir · 장소", "parent": "planning", "title_property": "장소", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "지역", "type": "rich_text", "input": true }, { "name": "종류", "type": "select", "options": ["관광", "맛집", "카페", "쇼핑", "숙소", "기타"], "input": true }, { "name": "지도 URL", "type": "url", "input": true }, { "name": "방문 완료", "type": "checkbox", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
+    ], "views": ["장소 입력", "장소 갤러리", "종류별 필터"] },
+    { "key": "weather", "title": "🌦️ 지역별 날씨", "parent": "planning", "title_property": "날씨 확인", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "지역", "type": "rich_text", "input": true }, { "name": "대상 기간", "type": "date", "input": true }, { "name": "최저 ℃", "type": "number", "input": true }, { "name": "최고 ℃", "type": "number", "input": true }, { "name": "강수 %", "type": "number", "input": true }, { "name": "확인 상태", "type": "select", "options": ["미정", "확인 필요", "확인 완료"], "input": true }, { "name": "공식 링크", "type": "url", "input": true }
+    ], "views": ["지역·기간", "확인 필요"] },
+    { "key": "schedule_check", "title": "⏱️ 일정 비교 검사", "parent": "planning", "title_property": "검사", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "기준 일정", "type": "rich_text", "input": true }, { "name": "비교 일정", "type": "rich_text", "input": true }, { "name": "검사 상태", "type": "select", "options": ["검사 대기", "문제 없음", "겹침", "이동 여유 부족", "확인 필요"], "input": true }, { "name": "필요 이동(분)", "type": "number", "input": true }, { "name": "필요 여유(분)", "type": "number", "input": true }
+    ], "views": ["시간·이동 검사"] },
+    { "key": "long_transport", "title": "🛫 항공·장거리 교통", "parent": "transport", "title_property": "구간", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "운항사", "type": "rich_text", "input": true }, { "name": "편명", "type": "rich_text", "input": true }, { "name": "출발", "type": "date", "input": true }, { "name": "도착", "type": "date", "input": true }, { "name": "예약 상태", "type": "select", "options": ["미정", "대기", "확정", "취소", "환불"], "input": true }, { "name": "예약번호", "type": "rich_text", "input": true }
+    ], "views": ["여정 카드", "구간·시간", "예약·탑승"] },
+    { "key": "local_transport", "title": "🚉 현지 이동", "parent": "transport", "title_property": "이동 구간", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "출발지", "type": "rich_text", "input": true }, { "name": "도착지", "type": "rich_text", "input": true }, { "name": "이용 날짜", "type": "date", "input": true }, { "name": "소요 시간(분)", "type": "number", "input": true }, { "name": "비용", "type": "number", "input": true }, { "name": "막차·심야 대안", "type": "rich_text", "input": true }
+    ], "views": ["구간별 이동", "노선·환승", "비용·시간"] },
+    { "key": "transport_service", "title": "🎫 교통패스·서비스·렌터카", "parent": "transport", "title_property": "서비스", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "서비스 유형", "type": "select", "options": ["교통카드", "패스", "택시·호출", "렌터카", "기타"], "input": true }, { "name": "구매 상태", "type": "select", "options": ["미정", "비교 중", "구매 필요", "구매 완료", "취소"], "input": true }, { "name": "비용", "type": "number", "input": true }, { "name": "링크", "type": "url", "input": true }
+    ], "views": ["비교·구매 상태"] },
+    { "key": "stay", "title": "🏨 숙소 정보", "parent": "transport", "title_property": "숙소", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "주소", "type": "rich_text", "input": true }, { "name": "체크인", "type": "date", "input": true }, { "name": "체크아웃", "type": "date", "input": true }, { "name": "숙소 상태", "type": "select", "options": ["후보", "확정", "취소"], "input": true }, { "name": "총액", "type": "number", "input": true }, { "name": "예약번호", "type": "rich_text", "input": true }, { "name": "지도 URL", "type": "url", "input": true }
+    ], "views": ["숙소 카드", "후보 비교", "확정 숙소"] },
+    { "key": "reservation", "title": "📌 예약·체크리스트", "parent": "transport", "title_property": "예약", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "예약 대상", "type": "select", "options": ["항공", "숙소", "식당", "체험", "티켓", "기타"], "input": true }, { "name": "이용 일시", "type": "date", "input": true }, { "name": "예약 상태", "type": "select", "options": ["대기", "완료", "취소", "환불"], "input": true }, { "name": "예약번호", "type": "rich_text", "input": true }, { "name": "결제액", "type": "number", "input": true }, { "name": "잔금", "type": "number", "input": true }, { "name": "취소 마감", "type": "date", "input": true }, { "name": "확인 링크", "type": "url", "input": true }
+    ], "views": ["예약 현황", "이용 달력", "마감 관리"] },
+    { "key": "wallet", "title": "💴 여행 지갑", "parent": "budget", "title_property": "지갑", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "통화", "type": "select", "options": ["KRW", "JPY", "USD", "EUR"], "input": true }, { "name": "준비 금액", "type": "number", "input": true }, { "name": "금액 입력 완료", "type": "checkbox", "input": true }, { "name": "사용액", "type": "number", "input": false, "computed": true }, { "name": "남은 금액", "type": "number", "input": false, "computed": true }, { "name": "사용률", "type": "number", "input": false, "computed": true }
+    ], "views": ["지갑 카드", "통화별 지갑"] },
+    { "key": "budget", "title": "📊 계획 예산", "parent": "budget", "title_property": "예산 항목", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "카테고리", "type": "select", "options": ["교통", "숙소", "식비", "체험", "쇼핑", "기타"], "input": true }, { "name": "예산 범위", "type": "select", "options": ["일행 전체", "1인"], "input": true }, { "name": "예산", "type": "number", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
+    ], "views": ["카테고리 한도", "예산 요약"] },
+    { "key": "expense", "title": "🧾 사용한 내역", "parent": "budget", "title_property": "내역", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "사용처", "type": "rich_text", "input": true }, { "name": "거래 유형", "type": "select", "options": ["지출", "환불"], "input": true }, { "name": "결제 단계", "type": "select", "options": ["선결제", "현장", "잔금", "예정"], "input": true }, { "name": "결제 수단", "type": "select", "options": ["카드", "현금", "이체", "기타"], "input": true }, { "name": "금액", "type": "number", "input": true }, { "name": "거래 상태", "type": "select", "options": ["예정", "완료", "취소"], "input": true }, { "name": "지갑 키", "type": "rich_text", "input": true }
+    ], "views": ["간편 기록", "사용 내역"] },
+    { "key": "traveler", "title": "👥 동행자", "parent": "budget", "title_property": "여행자", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "역할", "type": "select", "options": ["여행자", "예약 담당", "준비 담당", "정산 담당"], "input": true }, { "name": "상태", "type": "select", "options": ["참여", "보류", "불참"], "input": true }, { "name": "담당 영역", "type": "rich_text", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
+    ], "views": ["여행자·역할"] },
+    { "key": "split", "title": "⚖️ 지출별 분담", "parent": "budget", "title_property": "분담", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "사용 내역 키", "type": "rich_text", "input": true }, { "name": "부담자", "type": "rich_text", "input": true }, { "name": "분담 방식", "type": "select", "options": ["균등", "비율", "개별"], "input": true }, { "name": "부담액", "type": "number", "input": true }, { "name": "정산 포함", "type": "checkbox", "input": true }, { "name": "검토 상태", "type": "select", "options": ["검토 필요", "확인 완료"], "input": true }
+    ], "views": ["부담자별 분담", "검토 필요"] },
+    { "key": "settlement", "title": "💸 정산 송금", "parent": "budget", "title_property": "송금", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "보낸 사람", "type": "rich_text", "input": true }, { "name": "받은 사람", "type": "rich_text", "input": true }, { "name": "금액", "type": "number", "input": true }, { "name": "상태", "type": "select", "options": ["예정", "완료", "취소"], "input": true }, { "name": "날짜", "type": "date", "input": true }
+    ], "views": ["보낼 돈·받을 돈"] },
+    { "key": "decision", "title": "🗳️ 공동 결정", "parent": "budget", "title_property": "결정", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "선택지", "type": "rich_text", "input": true }, { "name": "결정 상태", "type": "select", "options": ["논의 중", "결정", "보류"], "input": true }, { "name": "담당자", "type": "rich_text", "input": true }, { "name": "기한", "type": "date", "input": true }, { "name": "의견 메모", "type": "rich_text", "input": true }
+    ], "views": ["결정·기한"] },
+    { "key": "task", "title": "✅ 준비할 일", "parent": "prep", "title_property": "할 일", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "시점", "type": "select", "options": ["여행 전", "출발 당일", "여행 중", "귀국 전", "귀국 후"], "input": true }, { "name": "상태", "type": "select", "options": ["시작 전", "진행 중", "완료", "제외"], "input": true }, { "name": "중요도", "type": "select", "options": ["필수", "중요", "선택"], "input": true }, { "name": "담당자", "type": "rich_text", "input": true }, { "name": "기한", "type": "date", "input": true }
+    ], "views": ["체크리스트", "상태 보드", "기한 달력"] },
+    { "key": "packing", "title": "🧳 준비물", "parent": "prep", "title_property": "준비물", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "공용·개인", "type": "select", "options": ["공용", "개인"], "input": true }, { "name": "분류", "type": "select", "options": ["서류", "전자기기", "의류", "위생", "의약품", "기타"], "input": true }, { "name": "상태", "type": "select", "options": ["미정", "구매 필요", "준비 완료", "제외"], "input": true }, { "name": "담당자", "type": "rich_text", "input": true }, { "name": "수량", "type": "number", "input": true }, { "name": "구매 필요", "type": "checkbox", "input": true }
+    ], "views": ["필수·미완료", "공용·개인", "담당자별"] },
+    { "key": "material", "title": "📚 여행 자료 보관함", "parent": "prep", "title_property": "자료", "properties": [
+      { "name": "여행 키", "type": "rich_text", "input": true }, { "name": "자료 종류", "type": "select", "options": ["공식 안내", "예약 확인서", "지도", "메모", "파일", "기타"], "input": true }, { "name": "중요도", "type": "select", "options": ["중요", "보관"], "input": true }, { "name": "상태", "type": "select", "options": ["확인 필요", "확인 완료", "보관"], "input": true }, { "name": "링크", "type": "url", "input": true }, { "name": "확인일", "type": "date", "input": true }, { "name": "메모", "type": "rich_text", "input": true }
+    ], "views": ["중요 자료", "전체 보관함"] }
+  ]
+}

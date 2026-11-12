@@ -14,7 +14,20 @@
 - 다른 워크스페이스의 링크는 현재 Notion 연결 도구가 직접 복제하지 못한다. 사용자가 Notion에서 공개 템플릿을 `복제`한 뒤 대상 사본의 URL·ID를 주면 `manual_duplicate`로 기록하고 그 사본을 연결한다.
 - 대상 사본이 없거나 링크가 없을 때만 이 청사진으로 재구성한다. 재구성 결과는 `blueprint_rebuild`로 기록하며 원본의 픽셀 단위 복제라고 표시하지 않는다.
 - Notion 쓰기 권한이 없으면 설치를 가장하지 말고, 생성할 구조와 필요한 권한을 채팅에 보여준다.
-- Python·TypeScript·외부 서버를 사용하지 않는다.
+- 외부 서버를 새로 운영하지 않는다. 저장소에 포함된 선택형 Python 설치기는 공식 Notion API와 사용자가 제공한 토큰만 사용하며, 토큰·쿠키·원본 ID를 저장소에 기록하지 않는다.
+
+## 링크 없이 설치하는 코드 경로
+
+공개·복제 가능한 템플릿 링크가 있으면 Notion의 `복제`가 가장 충실하다. 링크가 없거나 사용자가 직접 재구축을 선택하면 `skills/souvenir/scripts/notion_installer.py`가 `assets/template-manifest.json`을 읽어 대상 워크스페이스에 새 대시보드·네 묶음 페이지·20개 핵심 데이터베이스를 만든다.
+
+```bash
+python3 skills/souvenir/scripts/notion_installer.py validate
+python3 skills/souvenir/scripts/notion_installer.py plan --pretty
+NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py install \
+  --parent-page "<대상 상위 페이지 URL 또는 ID>"
+```
+
+`NOTION_TOKEN`은 로컬 환경 변수로만 주고 채팅·GitHub·매니페스트에 넣지 않는다. 설치 결과의 페이지·데이터베이스 ID는 `.souvenir-install.json`에 기록하며 이 파일은 공유하지 않는다. API 재구축은 구조·입력 속성·컬러 안내를 재생성하지만 네이티브 복제처럼 모든 뷰 배치·관계·수식·커버의 픽셀 단위 보존을 보장하지 않는다. 설치 후 Souvenir가 대상 워크스페이스의 관계·수식·상세 뷰를 연결하고 `template_source=code_rebuild`로 남긴다.
 
 ## 빠른 설치 순서
 
@@ -32,7 +45,7 @@
 3. `🎫 이동·예약`
 4. `💴 예산·동행`
 5. `🎒 준비·자료`
-6. `Souvenir · 설치 기록` — 설치 버전, 설치 시각, 상태(`진행 중`·`완료`·`중단`), 단계, 템플릿 출처(`native_duplicate`·`manual_duplicate`·`blueprint_rebuild`·`minimal_fallback`), 생성된 페이지·데이터베이스 매핑을 기록하는 내부 페이지
+6. `Souvenir · 설치 기록` — 설치 버전, 설치 시각, 상태(`진행 중`·`완료`·`중단`), 단계, 템플릿 출처(`native_duplicate`·`manual_duplicate`·`blueprint_rebuild`·`code_rebuild`·`minimal_fallback`), 생성된 페이지·데이터베이스 매핑을 기록하는 내부 페이지
 
 대시보드 순서는 다음을 유지한다.
 

@@ -8,7 +8,7 @@ Notion 연결을 사용해 여행 플래너를 만들고 계획을 수정하는 
 
 ## 처음 설치하기
 
-Souvenir는 별도 프로그램이 아니라 **플러그인으로 설치하거나 Codex 프로젝트에서 바로 불러 쓰는 여행 도우미**예요. Python, TypeScript, npm 설치는 필요하지 않아요.
+Souvenir는 별도 프로그램이 아니라 **플러그인으로 설치하거나 Codex 프로젝트에서 바로 불러 쓰는 여행 도우미**예요. 기본 사용에는 Python·TypeScript·npm이 필요하지 않지만, 다른 워크스페이스에 구조를 코드로 재구축하고 싶다면 저장소에 포함된 선택형 Python 설치기를 사용할 수 있어요.
 
 가장 쉬운 방법은 플러그인 설치예요. 플러그인을 설치할 수 없는 환경에서는 저장소를 직접 열어도 같은 스킬을 사용할 수 있어요.
 
@@ -87,6 +87,22 @@ $souvenir 새 여행 계획. 후쿠오카 3박 4일
 
 설치 기록이 있으면 기존 구조를 재사용하고, 사용자가 별도 템플릿 링크를 주면 그 템플릿을 우선해요.
 
+### 방법 C · 링크 없이 코드로 재구축하기 (선택)
+
+공개 템플릿 링크를 사용할 수 없거나, 각 워크스페이스에 구조를 새로 만들고 싶다면 저장소의 공식 Notion API 설치기를 사용할 수 있어요. 원본 비공개 페이지를 읽거나 복사하지 않고, 저장소에 포함된 **비식별 매니페스트**로 새 구조를 만들어요.
+
+```bash
+python3 skills/souvenir/scripts/notion_installer.py validate
+python3 skills/souvenir/scripts/notion_installer.py plan --pretty
+export NOTION_TOKEN="secret_..."
+python3 skills/souvenir/scripts/notion_installer.py install \
+  --parent-page "<대상 상위 페이지 URL 또는 ID>"
+```
+
+`NOTION_TOKEN`은 Notion에서 직접 만든 공식 통합 토큰을 로컬 환경 변수로만 사용하고, 채팅·GitHub·`.souvenir-install.json`에는 넣지 않아요. 대상 상위 페이지에는 해당 통합을 연결하고 페이지/데이터베이스 생성 권한을 줘야 해요. 설치 결과는 대상 ID 매핑과 `template_source=code_rebuild`를 `.souvenir-install.json`에 남겨 중단 후 재개할 수 있어요.
+
+이 경로는 대시보드·네 묶음·20개 핵심 데이터베이스·입력 속성을 재생성해요. Notion의 네이티브 `복제`처럼 원본의 모든 관계·수식·뷰 배치·커버를 픽셀 단위로 보존하는 방식은 아니므로, 설치 후 Souvenir가 대상 워크스페이스에서 상세 뷰와 계산을 이어서 구성해요. 최고 충실도가 필요하면 공개·복제 가능한 템플릿 링크에서 사용자가 직접 `복제`하는 방법을 우선해요.
+
 ## 업데이트하기
 
 Git clone으로 설치했다면 저장소 폴더에서 실행해요.
@@ -117,7 +133,7 @@ git pull
 원본과 최대한 같은 화면을 원하면 **공개·복제 가능한 Notion 템플릿 링크**를 함께 주세요. 같은 워크스페이스 안의 페이지라면 네이티브 복제를 시도하지만, 다른 워크스페이스의 페이지는 현재 Notion 연결 도구가 직접 복제할 수 없어요. 이 경우 링크를 열고 Notion에서 `복제`를 한 번 누른 뒤, 새로 생긴 대상 사본을 Souvenir가 연결해요. 대상 사본을 만들 수 없거나 링크가 없으면 [내장 템플릿 청사진](.agents/skills/souvenir/references/template-blueprint.md)으로 새 워크스페이스에 재구성해요. 이 방식은 구조와 디자인 계약을 재현하지만 원본의 픽셀 단위 복제라고 보장할 수는 없어요.
 
 - 원본 워크스페이스의 페이지·데이터베이스 ID, 사용자 데이터, 예시 거래는 복사하지 않아요.
-- `Souvenir · 설치 기록`에 대상 워크스페이스의 페이지·데이터베이스 매핑과 템플릿 출처(`native_duplicate`, `manual_duplicate` 또는 `blueprint_rebuild`)를 저장해요.
+- `Souvenir · 설치 기록`에 대상 워크스페이스의 페이지·데이터베이스 매핑과 템플릿 출처(`native_duplicate`, `manual_duplicate`, `blueprint_rebuild` 또는 `code_rebuild`)를 저장해요.
 - 이미 설치됐거나 중간에 멈춘 경우에는 기록을 우선 사용하고, 같은 객체를 반복 생성하거나 전체 DB를 다시 검색하지 않아요.
 - Notion 연결과 쓰기 권한이 없으면 설치하지 않고 필요한 권한과 구조를 안내해요.
 
@@ -132,7 +148,7 @@ git pull
 - 다른 워크스페이스에서 자동 복제하려면 현재 연결 도구의 범위를 넘어가므로, 사용자가 링크를 열어 `복제`하는 1회 동작이 필요해요.
 - 복제 후 새 사본의 URL·ID를 읽어 설치 기록에 저장하면 이후에는 다시 링크를 열지 않아도 돼요.
 
-따라서 가장 좋은 배포 형태는 **공개 Notion 템플릿 링크를 스킬에 내장하고, 첫 실행 때 사용자에게 한 번만 복제를 안내하는 방식**이에요. 링크 없이 완전 자동으로 원본을 재현하려면 청사진 재구성뿐인데, 이 경우 원본의 컬럼 폭·DB 뷰 설정·일부 레이아웃은 달라질 수 있어요.
+따라서 배포 형태는 두 가지예요. **최고 충실도**가 필요하면 공개 Notion 템플릿 링크를 스킬에 내장하고 첫 실행 때 사용자에게 한 번만 `복제`를 안내해요. 링크를 공개할 수 없거나 코드로 감사 가능한 설치를 원하면 저장소의 `template-manifest.json`과 Python 설치기를 사용해요. 코드 경로는 원본 ID·데이터를 복사하지 않고 구조를 새로 만들며, 원본의 모든 컬럼 폭·DB 뷰 배치·관계·수식을 그대로 보존한다고 보장하지 않아요.
 
 ## 입력과 결과를 구분해요
 
@@ -195,4 +211,4 @@ git pull
 - 무료 환경을 고려해 네이티브 차트는 새로 만들지 않아요. 이전 예산 DB의 차트 탭 1개는 삭제 도구/앱 입력 문제로 남아 있어요.
 - 플러그인 매니페스트·저장소 마켓플레이스·세 개의 시작 문구를 추가했어요. 실제 ChatGPT/Codex 데스크톱의 표시 위치와 클릭 후 동작은 설치 환경에서 한 번 더 확인해야 해요.
 
-Python·TypeScript·새 의존성은 추가하지 않았어요. 기존 구현·계산 검증·남은 제약은 [구현 기록](docs/implementation-notes.md)에 보존했어요. 스킬 규칙은 [SKILL.md](.agents/skills/souvenir/SKILL.md), 입력 설계는 [간편 입력 규칙](.agents/skills/souvenir/references/input-design.md)에서 볼 수 있어요.
+기본 스킬은 새 의존성 없이 동작하고, 코드 설치기는 Python 표준 라이브러리만 사용해요. 기존 구현·계산 검증·남은 제약은 [구현 기록](docs/implementation-notes.md)에 보존했어요. 스킬 규칙은 [SKILL.md](.agents/skills/souvenir/SKILL.md), 입력 설계는 [간편 입력 규칙](.agents/skills/souvenir/references/input-design.md), 코드 설치 설계는 [템플릿 청사진](skills/souvenir/references/template-blueprint.md)에서 볼 수 있어요.
