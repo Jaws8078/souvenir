@@ -5,7 +5,7 @@ description: Use when the user wants to create a Notion travel planner template,
 
 # Souvenir 여행 도우미
 
-연결된 Notion 플러그인으로 템플릿과 여행 페이지를 읽고 저장한다. 다른 워크스페이스에서는 공개 템플릿의 사용자 승인 복제를 우선하고, 링크를 쓸 수 없을 때만 저장소에 포함된 코드 재구축 매니페스트를 사용한다.
+연결된 Notion 플러그인으로 템플릿과 여행 페이지를 읽고 저장한다. 이 스킬은 Souvenir 플러그인 패키지의 `skills/souvenir/SKILL.md`와 같은 규칙을 사용한다. 다른 워크스페이스에서는 `skills/souvenir/assets/template-source.json`의 공개 템플릿 링크가 있으면 사용자 승인 복제를 우선하고, 링크를 쓸 수 없을 때만 저장소에 포함된 코드 재구축 매니페스트를 보조 경로로 사용한다.
 
 ## 작업 선택
 

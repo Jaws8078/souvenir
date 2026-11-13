@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "souvenir",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Notion에 여행 계획을 만들고 수정하는 Souvenir 여행 도우미.",
   "author": {
     "name": "Jaws8078"
@@ -24,8 +24,15 @@
         "longDescription": "Notion 연결을 사용해 여행 개요, 일정, 예약, 숙소, 예산, 동행자, 준비물과 자료를 한곳에서 관리합니다. 목적지와 기간만 입력해도 내장 템플릿으로 시작하며, 사용자의 메모와 기존 예약을 보존하면서 부분 수정합니다.",
         "developerName": "Jaws8078",
         "category": "Productivity",
-        "capabilities": [],
+        "websiteURL": "https://github.com/Jaws8078/souvenir",
+        "supportURL": "https://github.com/Jaws8078/souvenir/issues",
+        "capabilities": [
+          "Create Notion travel plans",
+          "Update itineraries with confirmation",
+          "Manage reservations, stays, budgets, and packing tasks"
+        ],
         "defaultPrompt": [
+          "Souvenir 설치 시작",
           "Souvenir로 여행 플래너 만들기",
           "Souvenir로 새 여행 계획",
           "Souvenir로 기존 일정 수정"

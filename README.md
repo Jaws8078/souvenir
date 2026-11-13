@@ -16,23 +16,32 @@ Souvenir는 별도 프로그램이 아니라 **플러그인으로 설치하거�
 
 #### Codex CLI에서 마켓플레이스 등록
 
-Codex CLI를 사용한다면 다음 명령으로 Souvenir 마켓플레이스를 등록해요.
+Codex CLI에서는 터틀넥과 같은 두 단계 흐름으로 마켓플레이스를 등록하고 플러그인을 설치해요.
 
 ```bash
 codex plugin marketplace add Jaws8078/souvenir --ref main
+codex plugin add souvenir@souvenir-marketplace
 ```
 
-등록 후 Codex 데스크톱의 Plugins Directory에서 **Souvenir 여행 도우미**를 설치하고 새 채팅을 시작해요.
+설치가 끝나면 새 Codex 채팅을 열고 `$souvenir`를 입력해요. 이미 등록한 마켓플레이스는 다음부터 다시 등록할 필요가 없어요.
 
 #### ChatGPT 데스크톱에서 설치
 
 1. Plugins Directory를 열어요.
 2. `Add Marketplace` 또는 `Add from repository`를 선택해요.
 3. `https://github.com/Jaws8078/souvenir`를 입력하고 동기화해요.
-4. **Souvenir**를 설치하고 새 채팅을 시작해요.
-5. Notion 연결을 완료한 뒤 `$souvenir` 또는 표시되는 시작 문구를 사용해요.
+4. **Souvenir**를 설치하고 새 Work 채팅을 시작해요.
+5. 입력창에서 `@`를 눌러 **Souvenir**를 선택하거나 표시되는 시작 문구를 사용해요.
 
 플러그인은 스킬·내장 템플릿·시작 문구를 묶어 설치하지만, Notion 계정과 워크스페이스 권한은 각 사용자가 별도로 연결해야 해요.
+
+### 플러그인 설치 후 첫 실행
+
+플러그인을 설치하면 Souvenir가 먼저 Notion 연결 상태를 확인해요. 연결이 없으면 공식 Notion 연결 화면에서 승인하고, 로그인 상태를 확인한 뒤 템플릿 설치 단계로 넘어가요.
+
+Notion 템플릿을 Marketplace에 등록한 뒤에는 [`skills/souvenir/assets/template-source.json`](skills/souvenir/assets/template-source.json)의 `template_url`에 공개·복제 가능한 템플릿 링크를 넣어요. 그러면 새 워크스페이스에서 이 링크가 첫 번째 설치 경로가 되고, 사용자가 Notion에서 한 번 `복제`한 사본을 Souvenir가 연결해요. 링크를 아직 넣지 않았거나 복제를 거절하면 내장 청사진은 보조 경로로만 사용해요.
+
+플러그인 설치와 Notion 템플릿 복제는 별개예요. 플러그인은 한 번 설치하면 새 채팅에서 재사용할 수 있지만, 각 Notion 워크스페이스의 연결·로그인·최초 복제 승인은 사용자가 한 번 진행해야 해요.
 
 ### 방법 B · 저장소를 직접 열기
 
