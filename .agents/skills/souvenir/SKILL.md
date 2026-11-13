@@ -19,6 +19,22 @@ description: Use when the user wants to create a Notion travel planner template,
 
 Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽는다. 비공개 초안은 페이지 생성의 `creation_mode: "draft"`로 저장하며 부모 위치를 함께 지정하지 않는다. 페이지 제목은 속성에 넣고 본문에는 중복하지 않는다. 저장 응답의 오류·경고를 확인한 뒤 성공한 페이지 링크를 안내한다.
 
+## 플러그인 빠른 시작 · 환경 점검과 명시적 설치
+
+새 컴퓨터에서 플러그인 설치 상태가 불확실하면 먼저 저장소 루트에서 아래 점검을 실행한다. 기본 실행은 Python·Codex 설치 여부와 ChatGPT 수동 설치 경로만 읽고, 설치 명령을 실행하지 않는다.
+
+```bash
+python3 skills/souvenir/scripts/install_souvenir.py
+```
+
+사용자가 실제 등록을 명시적으로 승인한 경우에만 `--apply`를 붙인다. 이 옵션은 공식 Codex CLI로 Souvenir 마켓플레이스를 등록하고 플러그인 목록을 확인한다. 비밀번호·쿠키·Notion 토큰은 읽거나 저장하지 않는다.
+
+```bash
+python3 skills/souvenir/scripts/install_souvenir.py --apply
+```
+
+Codex CLI가 없는 경우에는 설치 명령을 대신 실행했다고 말하지 말고, 사용자가 Codex를 설치하거나 ChatGPT Plugins Directory에서 Souvenir를 직접 설치하도록 안내한다. 설치가 끝난 뒤 새 Codex 채팅에서는 `$souvenir`를, ChatGPT Work에서는 `@Souvenir`를 선택해 호출한다. 이 설치기는 플러그인 배포를 대신하는 것이 아니라, 이미 로드된 Souvenir 패키지에서 공식 설치·검증 명령을 안전하게 묶어 주는 보조 실행기다.
+
 ## 시작 전 · Notion 앱/웹 실행 점검
 
 온보딩을 시작하기 전에 현재 실행 환경이 컴퓨터 제어(CUA)나 공식 앱 실행 UI를 제공하는지 확인한다. 이 단계는 로그인 정보를 수집하지 않으며, Python/TypeScript 설치기를 사용하지 않는다.

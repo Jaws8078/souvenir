@@ -12,11 +12,27 @@ Souvenir는 별도 프로그램이 아니라 **플러그인으로 설치하거�
 
 가장 쉬운 방법은 플러그인 설치예요. 플러그인을 설치할 수 없는 환경에서는 저장소를 직접 열어도 같은 스킬을 사용할 수 있어요.
 
+### 터틀넥 방식 빠른 시작
+
+저장소나 플러그인 패키지가 이미 열려 있는 환경에서는 설치기를 먼저 실행해 현재 환경만 확인할 수 있어요. 기본 실행은 설치하지 않는 점검 모드예요.
+
+```bash
+python3 skills/souvenir/scripts/install_souvenir.py
+```
+
+출력된 환경을 확인하고 실제 Codex 등록을 승인할 때만 `--apply`를 붙여요.
+
+```bash
+python3 skills/souvenir/scripts/install_souvenir.py --apply
+```
+
+설치기는 Codex CLI가 있을 때만 공식 마켓플레이스 등록·플러그인 설치·목록 검증을 실행해요. ChatGPT 데스크톱은 Plugins Directory에서 직접 설치해야 하며, 설치기에서 비밀번호·쿠키·Notion 토큰을 읽지 않아요. 설치가 끝난 뒤에는 새 채팅에서 `$souvenir` 또는 `@Souvenir 설치 시작` 한 문장으로 온보딩을 시작할 수 있어요.
+
 ### 방법 A · 플러그인으로 설치하기 (권장)
 
 #### Codex CLI에서 마켓플레이스 등록
 
-Codex CLI에서는 터틀넥과 같은 두 단계 흐름으로 마켓플레이스를 등록하고 플러그인을 설치해요.
+Codex CLI에서는 터틀넥과 같은 두 단계 흐름으로 마켓플레이스를 등록하고 플러그인을 설치해요. 위 설치기를 사용하면 아래 명령을 자동으로 순서대로 실행할 수 있어요.
 
 ```bash
 codex plugin marketplace add Jaws8078/souvenir --ref main
