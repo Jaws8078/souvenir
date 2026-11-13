@@ -117,6 +117,22 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
                 for row in rows:
                     if not isinstance(row, dict) or not isinstance(row.get("title"), str):
                         errors.append(f"seed_rows.{key}의 각 항목에는 title이 필요합니다.")
+    fixed_price_fields = {
+        "long_transport": ["항공권 예산"],
+        "stay": ["1박 비용", "총액"],
+    }
+    for database_key, fields in fixed_price_fields.items():
+        database = next((item for item in databases or [] if isinstance(item, dict) and item.get("key") == database_key), None)
+        if not database:
+            continue
+        specs = {item.get("name"): item for item in database.get("properties", []) if isinstance(item, dict)}
+        for field in fields:
+            spec = specs.get(field)
+            if not spec or spec.get("unit") != "KRW" or spec.get("format") != "won":
+                errors.append(f"{database_key}.{field}는 unit=KRW·format=won이어야 합니다.")
+        currency = specs.get("통화")
+        if not currency or currency.get("options") != ["KRW"] or currency.get("fixed") != "KRW":
+            errors.append(f"{database_key}.통화는 KRW 고정 선택지여야 합니다.")
     forbidden = ("app.notion.com", "notion.so", "collection://", "notion-file-block://")
     for text in iter_strings(manifest):
         if any(part in text for part in forbidden) or UUID_RE.search(text):
@@ -150,7 +166,7 @@ def api_property(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if kind == "rich_text":
         return {"rich_text": {}}
     if kind == "number":
-        return {"number": {"format": "number"}}
+        return {"number": {"format": spec.get("format", "number")}}
     if kind == "date":
         return {"date": {}}
     if kind == "checkbox":
