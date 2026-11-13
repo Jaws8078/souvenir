@@ -70,7 +70,7 @@ NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py in
 | place | `🗺️ Souvenir · 장소` | 장소 입력, 갤러리, 종류별 필터 | 여행, 일정 |
 | weather | `🌦️ 지역별 날씨` | 지역·기간 확인 | 여행, 장소 |
 | schedule_check | `⏱️ 일정 비교 검사` | 시간·이동 검사 | 여행, 기준 일정, 비교 일정 |
-| long_transport | `🛫 항공·장거리 교통` | 여정 카드·구간 | 여행, 일정, 공통 예약 |
+| long_transport | `✈️ 항공` | 항공 후보·여정 카드·구간 | 여행, 일정, 공통 예약 |
 | local_transport | `🚉 현지 이동` | 구간·막차·심야 대안 | 여행, 일정, 장거리 구간 |
 | transport_service | `🎫 교통패스·서비스·렌터카` | 비교·구매 상태 | 여행, 현지 이동 |
 | stay | `🏨 숙소 정보` | 후보·확정 갤러리 | 여행, 공통 예약 |

@@ -6,7 +6,8 @@ template cannot be duplicated. The Marketplace/Notion template is the canonical
 source of truth for design. This script never reads or writes the private
 reference page. The checked-in manifest is only a sanitized fallback snapshot;
 target page/database IDs are generated at install time and saved in a local
-mapping file.
+mapping file. After installation, the optional ``scaffold`` command creates a
+new trip row, day rows, traveler rows, a wallet, and starter preparation rows.
 
 The highest-fidelity route is still Notion's own Duplicate action on a public
 template link. Use this installer when a link is unavailable or when a local,
@@ -16,6 +17,7 @@ auditable rebuild is preferred.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -102,6 +104,19 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
             # The installer inserts a title property from title_property, so this is informational.
             if not database.get("title_property"):
                 errors.append(f"데이터베이스 {database.get('key')}에 title_property가 없습니다.")
+    seed_rows = manifest.get("seed_rows", {})
+    if seed_rows and not isinstance(seed_rows, dict):
+        errors.append("seed_rows는 데이터베이스 key를 가진 객체여야 합니다.")
+    if isinstance(seed_rows, dict):
+        for key, rows in seed_rows.items():
+            if key not in db_keys:
+                errors.append(f"seed_rows의 데이터베이스 key를 찾을 수 없습니다: {key}")
+            if not isinstance(rows, list):
+                errors.append(f"seed_rows.{key}는 배열이어야 합니다.")
+            else:
+                for row in rows:
+                    if not isinstance(row, dict) or not isinstance(row.get("title"), str):
+                        errors.append(f"seed_rows.{key}의 각 항목에는 title이 필요합니다.")
     forbidden = ("app.notion.com", "notion.so", "collection://", "notion-file-block://")
     for text in iter_strings(manifest):
         if any(part in text for part in forbidden) or UUID_RE.search(text):
@@ -208,6 +223,14 @@ class NotionClient:
             payload["icon"] = {"type": "emoji", "emoji": icon}
         return self.request("POST", "/databases", payload)
 
+    def create_database_page(self, database_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a starter row in a database without requiring a user token in chat."""
+        payload = {
+            "parent": {"database_id": database_id},
+            "properties": properties,
+        }
+        return self.request("POST", "/pages", payload)
+
     def append_blocks(self, block_id: str, blocks: List[Dict[str, Any]]) -> None:
         if blocks:
             self.request("PATCH", f"/blocks/{block_id}/children", {"children": blocks})
@@ -257,6 +280,205 @@ def database_properties(database: Dict[str, Any]) -> Dict[str, Any]:
     return properties
 
 
+def property_value(spec: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]:
+    """Convert a manifest seed value to a Notion page property payload."""
+    if spec.get("computed") or spec.get("type") in {"formula", "rollup", "relation"}:
+        return None
+    kind = spec.get("type")
+    if kind == "title":
+        return {"title": title_payload(str(value))}
+    if kind == "rich_text":
+        return {"rich_text": rich_text(str(value))}
+    if kind == "number":
+        return {"number": value}
+    if kind == "checkbox":
+        return {"checkbox": bool(value)}
+    if kind == "url":
+        return {"url": str(value)}
+    if kind == "select":
+        return {"select": {"name": str(value)}}
+    if kind == "multi_select":
+        values = value if isinstance(value, list) else [value]
+        return {"multi_select": [{"name": str(item)} for item in values]}
+    if kind == "date":
+        if isinstance(value, dict):
+            return {"date": value}
+        return {"date": {"start": str(value)}}
+    raise InstallerError(f"지원하지 않는 seed 속성 유형입니다: {kind}")
+
+
+def seed_properties(database: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+    specs = {spec["name"]: spec for spec in database.get("properties", []) if isinstance(spec, dict) and spec.get("name")}
+    properties: Dict[str, Any] = {
+        database["title_property"]: {"title": title_payload(row["title"])}
+    }
+    for name, value in row.get("values", {}).items():
+        spec = specs.get(name)
+        if not spec:
+            raise InstallerError(f"{database['key']} seed 행의 속성을 찾을 수 없습니다: {name}")
+        encoded = property_value(spec, value)
+        if encoded is not None:
+            properties[name] = encoded
+    return properties
+
+
+def seed_default_rows(manifest: Dict[str, Any], client: NotionClient, mapping: Dict[str, Any], mapping_path: Path) -> None:
+    """Add generic, unassigned starter rows once; never copy personal trip data."""
+    seed_rows = manifest.get("seed_rows", {})
+    if not seed_rows:
+        mapping.setdefault("seeded_rows", {})
+        return
+    db_by_key = {database["key"]: database for database in manifest["databases"]}
+    seeded = mapping.setdefault("seeded_rows", {})
+    for key, rows in seed_rows.items():
+        if key not in mapping.get("databases", {}):
+            continue
+        existing = seeded.setdefault(key, [])
+        for row in rows:
+            if row.get("title") in {item.get("title") for item in existing}:
+                continue
+            created = client.create_database_page(mapping["databases"][key], seed_properties(db_by_key[key], row))
+            existing.append({"title": row["title"], "id": created["id"]})
+            write_json(mapping_path, mapping)
+
+
+def database_by_key(manifest: Dict[str, Any], key: str) -> Dict[str, Any]:
+    try:
+        return next(database for database in manifest["databases"] if database.get("key") == key)
+    except StopIteration as exc:
+        raise InstallerError(f"매니페스트에서 데이터베이스를 찾지 못했습니다: {key}") from exc
+
+
+def parse_date(value: Optional[str], label: str) -> Optional[dt.date]:
+    if not value:
+        return None
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise InstallerError(f"{label}은 YYYY-MM-DD 형식이어야 합니다: {value}") from exc
+
+
+def scaffold_trip(
+    manifest: Dict[str, Any],
+    client: NotionClient,
+    mapping_path: Path,
+    destination: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    duration_days: Optional[int],
+    traveler_count: int,
+    currency: str,
+    trip_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    mapping = read_json(mapping_path)
+    if mapping.get("status") != "complete":
+        raise InstallerError("먼저 install을 완료해 .souvenir-install.json에 대상 DB 매핑을 만들어야 합니다.")
+    for key in ("trip", "itinerary", "traveler", "wallet", "task", "packing"):
+        if key not in mapping.get("databases", {}):
+            raise InstallerError(f"설치 기록에 {key} 데이터베이스 매핑이 없습니다.")
+
+    start = parse_date(start_date, "출발일")
+    end = parse_date(end_date, "종료일")
+    if start and end and end < start:
+        raise InstallerError("종료일은 출발일보다 빠를 수 없습니다.")
+    derived_days = (end - start).days + 1 if start and end else None
+    if duration_days is not None and duration_days < 1:
+        raise InstallerError("기간(일)은 1 이상의 정수여야 합니다.")
+    if derived_days and duration_days and derived_days != duration_days:
+        raise InstallerError("출발일·종료일과 기간(일)이 서로 다릅니다. 하나의 기준으로 다시 입력하세요.")
+    days = derived_days or duration_days
+    if not days:
+        raise InstallerError("출발일·종료일 또는 기간(일) 중 하나가 필요합니다.")
+    if traveler_count < 0:
+        raise InstallerError("여행 인원은 0 이상이어야 합니다.")
+    allowed_currency = {"KRW", "JPY", "USD", "EUR", "미정"}
+    if currency not in allowed_currency:
+        raise InstallerError("기준 통화는 KRW·JPY·USD·EUR·미정 중 하나여야 합니다.")
+
+    fingerprint = "|".join([
+        destination.strip(), start_date or "", end_date or "", str(days), str(traveler_count), currency,
+    ])
+    scaffolded = mapping.setdefault("scaffolded_trips", {})
+    if fingerprint in scaffolded:
+        return scaffolded[fingerprint]
+
+    trip_db = database_by_key(manifest, "trip")
+    trip_title = trip_name or f"✈️ {destination.strip()} 여행"
+    trip_values: Dict[str, Any] = {
+        "목적지": destination.strip(),
+        "여행 상태": "계획 중",
+        "인원": traveler_count if traveler_count else None,
+        "인원 기준": "직접 입력" if traveler_count else None,
+        "기준 통화": currency,
+    }
+    if start:
+        trip_values["출발일"] = start.isoformat()
+    if end:
+        trip_values["종료일"] = end.isoformat()
+    if start and end:
+        trip_values["여행 기간"] = {"start": start.isoformat(), "end": end.isoformat()}
+    trip_values["기간(일)"] = days
+    trip_row = {
+        "title": trip_title,
+        "values": {key: value for key, value in trip_values.items() if value is not None},
+    }
+    trip_page = client.create_database_page(mapping["databases"]["trip"], seed_properties(trip_db, trip_row))
+    trip_id = trip_page["id"]
+    result: Dict[str, Any] = {
+        "trip_id": trip_id,
+        "trip_name": trip_title,
+        "destination": destination.strip(),
+        "days": days,
+        "traveler_count": traveler_count,
+        "currency": currency,
+        "itinerary": [],
+        "travelers": [],
+        "wallet": None,
+        "tasks": [],
+        "packing": [],
+    }
+
+    itinerary_db = database_by_key(manifest, "itinerary")
+    for day in range(1, days + 1):
+        values: Dict[str, Any] = {"여행 키": trip_id, "일차": day, "상태": "계획"}
+        if start:
+            values["날짜"] = (start + dt.timedelta(days=day - 1)).isoformat()
+        row = {"title": f"{day}일차 계획", "values": values}
+        created = client.create_database_page(mapping["databases"]["itinerary"], seed_properties(itinerary_db, row))
+        result["itinerary"].append(created["id"])
+
+    traveler_db = database_by_key(manifest, "traveler")
+    for index in range(1, traveler_count + 1):
+        row = {
+            "title": f"동행자 {index}",
+            "values": {"여행 키": trip_id, "역할": "여행자", "상태": "참여"},
+        }
+        created = client.create_database_page(mapping["databases"]["traveler"], seed_properties(traveler_db, row))
+        result["travelers"].append(created["id"])
+
+    wallet_db = database_by_key(manifest, "wallet")
+    wallet_row = {
+        "title": f"{destination.strip()} 여행 지갑",
+        "values": {"여행 키": trip_id, "통화": currency, "금액 입력 완료": False},
+    }
+    wallet_page = client.create_database_page(mapping["databases"]["wallet"], seed_properties(wallet_db, wallet_row))
+    result["wallet"] = wallet_page["id"]
+
+    for key in ("task", "packing"):
+        database = database_by_key(manifest, key)
+        for starter in manifest.get("seed_rows", {}).get(key, []):
+            values = dict(starter.get("values", {}))
+            values["여행 키"] = trip_id
+            values["원본 구분"] = "사용 중"
+            row = {"title": starter["title"], "values": values}
+            created = client.create_database_page(mapping["databases"][key], seed_properties(database, row))
+            result["tasks" if key == "task" else "packing"].append(created["id"])
+
+    scaffolded[fingerprint] = result
+    write_json(mapping_path, mapping)
+    return result
+
+
 def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
     pages = manifest["pages"]
     databases = manifest["databases"]
@@ -277,7 +499,9 @@ def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             "원본 Notion 페이지·ID·사용자 데이터는 읽지 않습니다.",
             "Notion Marketplace 템플릿이 주 원본이며, 공개·복제 가능한 링크가 있으면 반드시 그 경로를 먼저 사용하세요.",
             "코드 재구축에서는 데이터베이스 구조를 만들고 뷰 이름을 안내합니다. 뷰의 실제 배치·관계·수식은 Souvenir 스킬 또는 Notion에서 후속 구성합니다.",
+            "기본 준비할 일·준비물 행은 개인 여행에 연결하지 않은 starter 행으로 한 번만 생성합니다.",
         ],
+        "seed_rows": {key: len(rows) for key, rows in manifest.get("seed_rows", {}).items()},
     }
 
 
@@ -328,6 +552,8 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
         ]
         mapping.setdefault("views", {})[key] = database.get("views", [])
         write_json(mapping_path, mapping)
+
+    seed_default_rows(manifest, client, mapping, mapping_path)
 
     if not content_rendered:
         dashboard_blocks: List[Dict[str, Any]] = []
@@ -393,13 +619,20 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir portable Notion template installer")
-    parser.add_argument("command", choices=["validate", "plan", "install"])
+    parser.add_argument("command", choices=["validate", "plan", "install", "scaffold"])
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--mapping", type=Path, default=DEFAULT_MAPPING)
     parser.add_argument("--parent-page", help="대상 워크스페이스에서 생성할 상위 Notion 페이지 ID 또는 URL")
     parser.add_argument("--token", default=None, help="Notion API 토큰. 생략하면 NOTION_TOKEN 환경 변수를 사용합니다.")
     parser.add_argument("--api-version", default=os.environ.get("NOTION_VERSION", "2022-06-28"))
     parser.add_argument("--pretty", action="store_true", help="계획/검증 결과를 보기 좋게 출력합니다.")
+    parser.add_argument("--destination", help="scaffold 여행 목적지")
+    parser.add_argument("--start-date", help="scaffold 출발일 YYYY-MM-DD")
+    parser.add_argument("--end-date", help="scaffold 종료일 YYYY-MM-DD")
+    parser.add_argument("--duration-days", type=int, help="scaffold 날짜가 없을 때 여행 기간(일)")
+    parser.add_argument("--travelers", type=int, default=0, help="scaffold 여행 인원. 0이면 미정")
+    parser.add_argument("--currency", default="미정", help="scaffold 기준 통화: KRW·JPY·USD·EUR·미정")
+    parser.add_argument("--trip-name", help="scaffold 여행 페이지 제목")
     return parser
 
 
@@ -420,11 +653,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         token = args.token or os.environ.get("NOTION_TOKEN")
         if not token:
-            raise InstallerError("install에는 NOTION_TOKEN 환경 변수 또는 --token이 필요합니다. 토큰을 채팅에 붙여넣지 마세요.")
+            raise InstallerError(f"{args.command}에는 NOTION_TOKEN 환경 변수 또는 --token이 필요합니다. 토큰을 채팅에 붙여넣지 마세요.")
+        client = NotionClient(token, args.api_version)
+        if args.command == "scaffold":
+            if not args.destination:
+                raise InstallerError("scaffold에는 --destination이 필요합니다.")
+            result = scaffold_trip(
+                manifest,
+                client,
+                args.mapping,
+                args.destination,
+                args.start_date,
+                args.end_date,
+                args.duration_days,
+                args.travelers,
+                args.currency,
+                args.trip_name,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
+            return 0
         if not args.parent_page:
             raise InstallerError("install에는 --parent-page가 필요합니다. 대상 워크스페이스의 상위 페이지를 지정하세요.")
         parent_id = normalize_id(args.parent_page)
-        mapping = install(manifest, NotionClient(token, args.api_version), parent_id, args.mapping)
+        mapping = install(manifest, client, parent_id, args.mapping)
         print(f"Souvenir 설치 완료: 페이지 {len(mapping['pages'])}개 · 데이터베이스 {len(mapping['databases'])}개")
         print(f"설치 기록: {args.mapping}")
         return 0
