@@ -4,4 +4,4 @@ interface:
   icon_small: "./assets/souvenir-icon.png"
   icon_large: "./assets/souvenir-icon.png"
   brand_color: "#2F5D8A"
-  default_prompt: "$souvenir로 Notion 여행 계획을 시작하고 다음 단계를 안내받으세요."
+  default_prompt: "$souvenir로 시작하면 Notion 연결을 먼저 확인하고 여행 계획 단계를 안내합니다."

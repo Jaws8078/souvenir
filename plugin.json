@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "souvenir",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Notion에 여행 계획을 만들고 수정하는 Souvenir 여행 도우미.",
   "author": {
     "name": "Jaws8078"
@@ -34,7 +34,7 @@
           "Run local travel checks and calculations"
         ],
         "defaultPrompt": [
-          "Souvenir 설치 시작",
+          "Souvenir 설치 시작 — Notion 연결 확인",
           "Souvenir로 여행 플래너 만들기",
           "Souvenir로 새 여행 계획",
           "Souvenir로 기존 일정 수정"

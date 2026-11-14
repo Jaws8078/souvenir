@@ -7,13 +7,15 @@
 대화가 이어지는 동안 아래 상태를 유지한다. Notion에는 비밀번호·쿠키·토큰을 저장하지 않는다.
 
 ```text
-setup: notion_connection → skill_active → login → template
+setup: notion_connection(unknown|connected|needs_user_action|unavailable) → skill_active → login → template
 trip: trip_id, destination, start_date, end_date, duration_days,
       traveler_count, base_currency
 plan: selected_parts, current_part, completed_parts
 ```
 
-각 단계가 끝날 때 `Souvenir · 설치 기록` 또는 여행 요약 행의 상태를 갱신한다. 사용자가 중간에 멈추면 같은 `current_part`부터 재개하고, 이미 저장된 행은 제목·여행 키·원본 ID를 기준으로 재사용한다.
+각 단계가 끝날 때 `Souvenir · 설치 기록` 또는 여행 요약 행의 상태를 갱신한다. 사용자가 중간에 멈추면 같은 `current_part`부터 재개하고, 이미 저장된 행은 제목·여행 키·원본 ID를 기준으로 재사용한다. `notion_connection`이 `needs_user_action` 또는 `unavailable`이면 여행 데이터 단계로 넘어가지 않고 연결 안내에서 멈춘다.
+
+첫 실행의 연결 확인은 읽기 전용 Notion 요청 한 번으로 시작한다. 요청이 연결 UI를 반환하면 그 UI를 보여주고, 사용자가 승인했다고 답한 뒤 같은 요청을 한 번 재시도한다. Souvenir가 다른 플러그인을 자동 설치하거나 사용자의 OAuth 승인을 대신한다고 설명하지 않는다.
 
 ## 시작 질문
 

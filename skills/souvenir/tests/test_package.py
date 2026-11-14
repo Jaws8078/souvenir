@@ -34,6 +34,19 @@ class PackageTests(unittest.TestCase):
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8"))
         self.assertEqual(marketplace["plugins"][0]["name"], plugin["name"])
 
+    def test_notion_connection_gate_is_documented(self):
+        skill = (PACKAGE / "SKILL.md").read_text(encoding="utf-8")
+        onboarding = (PACKAGE / "references" / "onboarding.md").read_text(encoding="utf-8")
+        flow = (PACKAGE / "references" / "conversation-flow.md").read_text(encoding="utf-8")
+        self.assertIn("Notion 연결 게이트", skill)
+        self.assertIn("notion_connection=connected", skill)
+        self.assertIn("공식 연결 UI", onboarding)
+        self.assertIn("읽기 전용 Notion 요청 한 번", flow)
+
+        plugin = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
+        prompts = plugin["extensions"]["com.openai"]["interface"]["defaultPrompt"]
+        self.assertTrue(any("Notion 연결" in prompt for prompt in prompts))
+
     def test_packaged_skill_references_do_not_require_local_checkout(self):
         for file in PACKAGE.rglob("*.md"):
             for target in re.findall(r"\]\(([^)]+)\)", file.read_text(encoding="utf-8")):
