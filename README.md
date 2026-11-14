@@ -337,6 +337,6 @@ python3 skills/souvenir/scripts/notion_installer.py plan --pretty
 python3 skills/souvenir/scripts/install_souvenir.py
 ```
 
-테스트는 중단 후 재개, 중복 생성 방지, 다른 설치 대상 혼용 방지, 날짜·통화 입력, API 오류·재시도, 긴 텍스트·블록 분할, 스킬 문서 연결을 확인해요. GitHub Actions는 Linux·Windows의 Python 3.9·3.13에서 같은 검증을 실행해요. 이 검증은 Notion의 실제 복제·화면 렌더링·수식 계산을 검증한 결과와 구분해요.
+테스트는 중단 후 재개, 중복 생성 방지, 다른 설치 대상 혼용 방지, 날짜·통화 입력, API 오류·재시도, 긴 텍스트·블록 분할, 스킬 문서 연결을 확인해요. GitHub Actions는 Linux·Windows의 Python 3.10·3.13에서 같은 검증을 실행하고, Python 3.9 최소 호환성은 로컬 회귀 테스트로 확인해요. 이 검증은 Notion의 실제 복제·화면 렌더링·수식 계산을 검증한 결과와 구분해요.
 
 API 요청 제한 처리는 [Notion 공식 문서](https://developers.notion.com/reference/request-limits)를 따라요. 429·529는 대기 지시를 존중해 제한적으로 재시도하고, 저장 여부가 불분명한 쓰기 요청은 자동 재전송하지 않아요.

@@ -10,7 +10,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ['3.9', '3.13']
+        # GitHub's current ubuntu-latest image no longer publishes a Python 3.9
+        # toolcache build. Keep the minimum version covered locally and use the
+        # oldest broadly available hosted runtime here.
+        python: ['3.10', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
