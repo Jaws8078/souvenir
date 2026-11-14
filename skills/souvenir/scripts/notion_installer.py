@@ -25,11 +25,14 @@ import math
 import os
 import random
 import re
+import socket
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -40,6 +43,7 @@ DEFAULT_MAPPING = Path(".souvenir-install.json")
 UUID_RE = re.compile(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", re.I)
 BLOCK_BATCH_SIZE = 100
 TEXT_LIMIT = 2000
+IDEMPOTENCY_PROPERTY = "Souvenir 작업 키"
 
 
 def configure_output() -> None:
@@ -59,6 +63,96 @@ class InstallerError(RuntimeError):
 
 class UncertainWriteError(InstallerError):
     """The server may have saved a write; inspect it before replaying it."""
+
+
+class ConflictError(InstallerError):
+    """The target changed after it was read; do not apply a stale update."""
+
+
+class LocalOperationLock:
+    """Cross-platform, same-machine lock for one Souvenir write operation.
+
+    ``O_EXCL`` makes lock acquisition atomic even when two Python processes start
+    at the same time.  A stale lock is intentionally not removed automatically:
+    deleting it could allow two writers after a slow process resumes.
+    """
+
+    def __init__(self, path: Path, operation: str) -> None:
+        self.path = path
+        self.operation = operation
+        self.owner = uuid.uuid4().hex
+        self._fd: Optional[int] = None
+
+    def __enter__(self) -> "LocalOperationLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "owner": self.owner,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "operation": self.operation,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        try:
+            self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(self._fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            os.fsync(self._fd)
+        except FileExistsError as exc:
+            details = ""
+            try:
+                details = self.path.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+            raise InstallerError(
+                f"다른 Souvenir 쓰기 작업이 진행 중입니다: {self.path}"
+                + (f" ({details})" if details else "")
+                + " 작업이 끝난 뒤 다시 시도하세요. 오래된 잠금은 실행 중인 프로세스가 없는지 확인한 뒤 직접 제거하세요."
+            ) from exc
+        except OSError as exc:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
+            raise InstallerError(f"쓰기 잠금을 만들지 못했습니다: {self.path} ({exc})") from exc
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        try:
+            current = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(current, dict) and current.get("owner") == self.owner:
+                self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, UnicodeError):
+            # Never remove a lock whose ownership cannot be established.
+            if exc_type is None:
+                raise InstallerError(f"쓰기 잠금의 소유자를 확인하지 못했습니다: {self.path}")
+        except OSError as exc:
+            # The remote operation already completed; leave an explicit warning
+            # rather than masking the original exception.
+            if exc_type is None:
+                raise InstallerError(f"쓰기 잠금을 해제하지 못했습니다: {self.path} ({exc})") from exc
+
+
+def _lock_name(mapping_path: Path, scope: str) -> Path:
+    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
+    return mapping_path.parent / f".{mapping_path.name}.{digest}.lock"
+
+
+def _workspace_lock_name(mapping_path: Path, workspace_key: str) -> Path:
+    digest = hashlib.sha256(workspace_key.encode("utf-8")).hexdigest()[:16]
+    return mapping_path.parent / f".souvenir-workspace-{digest}.lock"
+
+
+@contextmanager
+def operation_locks(mapping_path: Path, workspace_key: str, operation: str) -> Any:
+    """Serialize local writes for both one mapping and one Notion parent."""
+    mapping_lock = LocalOperationLock(_lock_name(mapping_path, "mapping:" + str(mapping_path.resolve())), operation)
+    workspace_lock = LocalOperationLock(_workspace_lock_name(mapping_path, workspace_key), operation)
+    with mapping_lock:
+        with workspace_lock:
+            yield
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -98,8 +192,13 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
 
 def check_pending(mapping: Dict[str, Any]) -> None:
     if mapping.get("pending_operation"):
+        pending = mapping["pending_operation"]
+        if isinstance(pending, dict):
+            label = pending.get("key", "알 수 없는 작업")
+        else:
+            label = pending
         raise InstallerError(
-            f"저장 결과 확인이 필요한 작업이 있습니다: {mapping['pending_operation']}. "
+            f"저장 결과 확인이 필요한 작업이 있습니다: {label}. "
             "대상 Notion에서 생성 여부를 확인하고 매핑을 복구한 뒤 재개하세요. "
             "확인 없이 설치 기록을 지우면 중복 생성될 수 있습니다."
         )
@@ -113,13 +212,22 @@ def check_manifest_version(mapping: Dict[str, Any], manifest: Dict[str, Any]) ->
 
 
 def recorded_write(mapping: Dict[str, Any], path: Path, key: str,
-                   action: Callable[[], Any], record: Callable[[Any], None]) -> None:
+                   action: Callable[[], Any], record: Callable[[Any], None],
+                   verify: Optional[Callable[[Any], None]] = None,
+                   idempotency_key: Optional[str] = None) -> None:
     """Journal a remote mutation and checkpoint its result before proceeding."""
     check_pending(mapping)
-    mapping["pending_operation"] = key
+    mapping["pending_operation"] = {
+        "key": key,
+        "operation_id": uuid.uuid4().hex,
+        "idempotency_key": idempotency_key,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
     write_json(path, mapping)
     try:
         result = action()
+        if verify is not None:
+            verify(result)
     except UncertainWriteError:
         raise
     except InstallerError:
@@ -436,6 +544,15 @@ class NotionClient:
             payload["icon"] = {"type": "emoji", "emoji": icon}
         return self.request("POST", "/databases", payload)
 
+    def get_database(self, database_id: str) -> Dict[str, Any]:
+        return self.request("GET", f"/databases/{database_id}")
+
+    def add_database_property(self, database_id: str, name: str) -> Dict[str, Any]:
+        """Add the implementation key to an older fallback database."""
+        return self.request("PATCH", f"/databases/{database_id}", {
+            "properties": {name: {"rich_text": {}}},
+        })
+
     def create_database_page(self, database_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
         """Create a starter row in a database without requiring a user token in chat."""
         payload = {
@@ -460,9 +577,31 @@ class NotionClient:
                 return rows
             body["start_cursor"] = cursor
 
-    def update_page_properties(self, page_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
-        """Update only explicitly supplied properties; callers must show a diff first."""
-        return self.request("PATCH", f"/pages/{page_id}", {"properties": properties})
+    def update_page_properties(self, page_id: str, properties: Dict[str, Any],
+                               expected_last_edited_time: Optional[str] = None) -> Dict[str, Any]:
+        """Patch selected properties with an optional optimistic version check.
+
+        Notion does not expose a transaction in this client. When a caller has a
+        snapshot timestamp, reread immediately before PATCH and abort if another
+        writer changed the page. The response is reread after PATCH so callers do
+        not treat an acknowledged request as verified data.
+        """
+        if expected_last_edited_time is not None:
+            current = self.get_page(page_id)
+            actual = current.get("last_edited_time")
+            if actual != expected_last_edited_time:
+                raise ConflictError(
+                    f"Notion 페이지가 먼저 변경되었습니다: {page_id} "
+                    f"(기대 {expected_last_edited_time}, 현재 {actual})"
+                )
+        result = self.request("PATCH", f"/pages/{page_id}", {"properties": properties})
+        try:
+            verified = self.get_page(page_id)
+        except Exception as exc:
+            raise UncertainWriteError("속성 저장 후 확인 읽기에 실패했습니다. 저장 여부를 확인하세요.") from exc
+        if not isinstance(verified, dict) or verified.get("id") != page_id:
+            raise UncertainWriteError("속성 저장 결과를 다시 확인하지 못했습니다. 저장 여부를 확인하세요.")
+        return verified
 
     def append_blocks(self, block_id: str, blocks: List[Dict[str, Any]]) -> None:
         for offset in range(0, len(blocks), BLOCK_BATCH_SIZE):
@@ -511,6 +650,10 @@ def database_properties(database: Dict[str, Any]) -> Dict[str, Any]:
         value = api_property(spec)
         if value is not None:
             properties[spec["name"]] = value
+    # Every fallback-created database gets an internal stable key field. The
+    # Notion view configuration should hide this implementation field from the
+    # user's primary views while it remains available for deduplication.
+    properties.setdefault(IDEMPOTENCY_PROPERTY, {"rich_text": {}})
     return properties
 
 
@@ -566,7 +709,104 @@ def seed_properties(database: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, 
         encoded = property_value(spec, value)
         if encoded is not None:
             properties[name] = encoded
+    if row.get("souvenir_key"):
+        properties[IDEMPOTENCY_PROPERTY] = {"rich_text": rich_text(str(row["souvenir_key"]))}
     return properties
+
+
+def stable_key(*parts: Any) -> str:
+    """Return a deterministic, non-sensitive key suitable for a Notion row."""
+    payload = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "souvenir:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def verify_created(client: Any, result: Any) -> None:
+    """Confirm a newly created Notion page is readable before checkpointing it."""
+    if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not result["id"]:
+        raise UncertainWriteError("Notion 생성 응답에 페이지 ID가 없습니다. 저장 여부를 확인하세요.")
+    try:
+        verified = client.get_page(result["id"])
+    except UncertainWriteError:
+        raise
+    except Exception as exc:  # A successful create followed by a failed read is uncertain.
+        raise UncertainWriteError("생성 후 확인 읽기에 실패했습니다. 저장 여부를 확인하세요.") from exc
+    if not isinstance(verified, dict) or verified.get("id") != result["id"]:
+        raise UncertainWriteError("생성된 페이지를 다시 확인하지 못했습니다. 저장 여부를 확인하세요.")
+
+
+def find_existing_row(client: Any, database_id: str, key: str) -> Optional[str]:
+    """Find exactly one row with a stable key; never create blindly on ambiguity."""
+    query = getattr(client, "query_database", None)
+    if not callable(query):
+        return None
+    rows = query(database_id, {
+        "filter": {
+            "property": IDEMPOTENCY_PROPERTY,
+            "rich_text": {"equals": key},
+        },
+        "page_size": 2,
+    })
+    if len(rows) > 1:
+        raise ConflictError(f"동일한 작업 키를 가진 Notion 행이 여러 개입니다: {key}")
+    if rows and isinstance(rows[0].get("id"), str):
+        return rows[0]["id"]
+    return None
+
+
+def ensure_database_row(mapping: Dict[str, Any], path: Path, client: Any,
+                        database_id: str, properties: Dict[str, Any],
+                        operation: str, key: str,
+                        record: Callable[[Dict[str, Any]], None]) -> None:
+    """Reuse a row by key or create it once with journal + verification."""
+    existing = find_existing_row(client, database_id, key)
+    if existing:
+        record({"id": existing})
+        write_json(path, mapping)
+        return
+    recorded_write(
+        mapping,
+        path,
+        operation,
+        lambda: client.create_database_page(database_id, properties),
+        record,
+        verify=lambda created: verify_created(client, created),
+        idempotency_key=key,
+    )
+
+
+def ensure_idempotency_schema(mapping: Dict[str, Any], path: Path, client: Any) -> None:
+    """Migrate older fallback databases before any key-based create/query."""
+    get_database = getattr(client, "get_database", None)
+    add_property = getattr(client, "add_database_property", None)
+    if not callable(get_database) or not callable(add_property):
+        raise InstallerError("Souvenir 작업 키를 확인하려면 Notion 데이터베이스 읽기·수정 권한이 필요합니다.")
+    if mapping.get("idempotency_schema") == 1:
+        return
+    for key, database_id in mapping.get("databases", {}).items():
+        current = get_database(database_id)
+        properties = current.get("properties", {}) if isinstance(current, dict) else {}
+        if not isinstance(properties, dict):
+            raise InstallerError(f"데이터베이스 속성을 읽지 못했습니다: {key}")
+        if IDEMPOTENCY_PROPERTY in properties:
+            continue
+        recorded_write(
+            mapping,
+            path,
+            f"schema:{key}:{IDEMPOTENCY_PROPERTY}",
+            lambda database_id=database_id: add_property(database_id, IDEMPOTENCY_PROPERTY),
+            lambda _: None,
+            verify=lambda _: _verify_database_property(client, database_id),
+            idempotency_key=stable_key("schema", mapping.get("template_key"), key, IDEMPOTENCY_PROPERTY),
+        )
+    mapping["idempotency_schema"] = 1
+    write_json(path, mapping)
+
+
+def _verify_database_property(client: Any, database_id: str) -> None:
+    current = client.get_database(database_id)
+    properties = current.get("properties", {}) if isinstance(current, dict) else {}
+    if IDEMPOTENCY_PROPERTY not in properties:
+        raise UncertainWriteError("Souvenir 작업 키 속성을 저장 후 확인하지 못했습니다.")
 
 
 def seed_default_rows(manifest: Dict[str, Any], client: NotionClient, mapping: Dict[str, Any], mapping_path: Path) -> None:
@@ -585,10 +825,19 @@ def seed_default_rows(manifest: Dict[str, Any], client: NotionClient, mapping: D
         for row in rows:
             if row["title"] in existing_titles:
                 continue
+            row = dict(row)
+            row["souvenir_key"] = stable_key("seed", mapping.get("template_key"), key, row["title"])
             properties = seed_properties(db_by_key[key], row)
-            recorded_write(mapping, mapping_path, f"seed:{key}:{row['title']}",
-                           lambda: client.create_database_page(mapping["databases"][key], properties),
-                           lambda created: existing.append({"title": row["title"], "id": created["id"]}))
+            ensure_database_row(
+                mapping,
+                mapping_path,
+                client,
+                mapping["databases"][key],
+                properties,
+                f"seed:{key}:{row['title']}",
+                row["souvenir_key"],
+                lambda created, title=row["title"]: existing.append({"title": title, "id": created["id"]}),
+            )
             existing_titles.add(row["title"])
 
 
@@ -610,7 +859,7 @@ def parse_date(value: Optional[str], label: str) -> Optional[dt.date]:
         raise InstallerError(f"{label}은 YYYY-MM-DD 형식이어야 합니다: {value}") from exc
 
 
-def scaffold_trip(
+def _scaffold_trip_unlocked(
     manifest: Dict[str, Any],
     client: NotionClient,
     mapping_path: Path,
@@ -667,6 +916,7 @@ def scaffold_trip(
     fingerprint = json.dumps([destination, start.isoformat() if start else None,
                               end.isoformat() if end else None, days, traveler_count,
                               currency, trip_title], ensure_ascii=False)
+    trip_key = stable_key("trip", manifest.get("template_key"), fingerprint)
     scaffolded = mapping.setdefault("scaffolded_trips", {})
     legacy_key = "|".join([destination, start_date or "", end_date or "",
                            str(days), str(traveler_count), currency])
@@ -694,6 +944,7 @@ def scaffold_trip(
     trip_values["기간(일)"] = days
     trip_row = {
         "title": trip_title,
+        "souvenir_key": trip_key,
         "values": {key: value for key, value in trip_values.items() if value is not None},
     }
     result: Dict[str, Any] = scaffolded.setdefault(fingerprint, {
@@ -720,18 +971,20 @@ def scaffold_trip(
         values: Dict[str, Any] = {"여행 키": trip_id, "일차": day, "상태": "계획"}
         if start:
             values["날짜"] = (start + dt.timedelta(days=day - 1)).isoformat()
-        row = {"title": f"{day}일차 계획", "values": values}
+        row = {"title": f"{day}일차 계획", "souvenir_key": stable_key("trip", trip_key, "itinerary", day), "values": values}
         rows.append(("itinerary", "itinerary", row))
 
     for index in range(1, traveler_count + 1):
         row = {
             "title": f"동행자 {index}",
+            "souvenir_key": stable_key("trip", trip_key, "traveler", index),
             "values": {"여행 키": trip_id, "역할": "여행자", "상태": "참여"},
         }
         rows.append(("traveler", "travelers", row))
 
     wallet_row = {
         "title": f"{destination} 여행 지갑",
+        "souvenir_key": stable_key("trip", trip_key, "wallet"),
         "values": {"여행 키": trip_id, "통화": currency, "금액 입력 완료": False},
     }
     rows.append(("wallet", "wallet", wallet_row))
@@ -741,15 +994,30 @@ def scaffold_trip(
             values = dict(starter.get("values", {}))
             values["여행 키"] = trip_id
             values["원본 구분"] = "사용 중"
-            row = {"title": starter["title"], "values": values}
+            row = {
+                "title": starter["title"],
+                "souvenir_key": stable_key("trip", trip_key, key, starter["title"]),
+                "values": values,
+            }
             rows.append((key, "tasks" if key == "task" else "packing", row))
 
     for key, _, row in rows:
         seed_properties(databases[key], row)
     if not result["trip_id"]:
-        recorded_write(mapping, mapping_path, "scaffold:trip",
-                       lambda: client.create_database_page(mapping["databases"]["trip"], trip_properties),
-                       lambda created: result.update(trip_id=created["id"]))
+        existing_trip = find_existing_row(client, mapping["databases"]["trip"], trip_key)
+        if existing_trip:
+            result["trip_id"] = existing_trip
+            write_json(mapping_path, mapping)
+        else:
+            recorded_write(
+                mapping,
+                mapping_path,
+                "scaffold:trip",
+                lambda: client.create_database_page(mapping["databases"]["trip"], trip_properties),
+                lambda created: result.update(trip_id=created["id"]),
+                verify=lambda created: verify_created(client, created),
+                idempotency_key=trip_key,
+            )
     completed = {field: len(result[field]) for field in ("itinerary", "travelers", "tasks", "packing")}
     seen: Dict[str, int] = {}
     for key, field, row in rows:
@@ -766,12 +1034,50 @@ def scaffold_trip(
             else:
                 result[field].append(created["id"])
 
-        recorded_write(mapping, mapping_path, f"scaffold:{field}:{index}",
-                       lambda: client.create_database_page(mapping["databases"][key], properties), record)
+        ensure_database_row(
+            mapping,
+            mapping_path,
+            client,
+            mapping["databases"][key],
+            properties,
+            f"scaffold:{field}:{index}",
+            row["souvenir_key"],
+            record,
+        )
 
     result["status"] = "complete"
     write_json(mapping_path, mapping)
     return result
+
+
+def scaffold_trip(
+    manifest: Dict[str, Any],
+    client: NotionClient,
+    mapping_path: Path,
+    destination: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    duration_days: Optional[int],
+    traveler_count: int,
+    currency: str,
+    trip_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create/reuse a trip while holding both local write locks."""
+    mapping = read_json(mapping_path)
+    workspace_key = str(mapping.get("parent_page_id") or "unknown")
+    with operation_locks(mapping_path, workspace_key, "scaffold"):
+        return _scaffold_trip_unlocked(
+            manifest,
+            client,
+            mapping_path,
+            destination,
+            start_date,
+            end_date,
+            duration_days,
+            traveler_count,
+            currency,
+            trip_name,
+        )
 
 
 def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -797,12 +1103,13 @@ def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
             "Notion Marketplace 템플릿이 주 원본이며, 공개·복제 가능한 링크가 있으면 반드시 그 경로를 먼저 사용하세요.",
             "코드 재구축에서는 데이터베이스 구조를 만들고 뷰 이름을 안내합니다. 뷰의 실제 배치·관계·수식은 Souvenir 스킬 또는 Notion에서 후속 구성합니다.",
             "기본 준비할 일·준비물 행은 개인 여행에 연결하지 않은 starter 행으로 한 번만 생성합니다.",
+            "install·scaffold는 매핑·상위 페이지 잠금을 잡고, 생성 행에는 Souvenir 작업 키를 넣어 중복을 확인합니다.",
         ],
         "seed_rows": {key: len(rows) for key, rows in manifest.get("seed_rows", {}).items()},
     }
 
 
-def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapping_path: Path) -> Dict[str, Any]:
+def _install_unlocked(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapping_path: Path) -> Dict[str, Any]:
     errors = validate_manifest(manifest)
     if errors:
         raise InstallerError("매니페스트 검증 실패:\n- " + "\n- ".join(errors))
@@ -838,7 +1145,9 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
         parent = parent_id if page["parent"] == "target" else ensure_page(page["parent"])
         recorded_write(mapping, mapping_path, f"page:{key}",
                        lambda: client.create_page(parent, page["title"], page.get("icon")),
-                       lambda created: mapping["pages"].update({key: created["id"]}))
+                       lambda created: mapping["pages"].update({key: created["id"]}),
+                       verify=lambda created: verify_created(client, created),
+                       idempotency_key=stable_key("page", mapping.get("template_key"), key, parent))
         return mapping["pages"][key]
 
     for page in manifest["pages"]:
@@ -856,8 +1165,11 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
         properties = database_properties(database)
         recorded_write(mapping, mapping_path, f"database:{key}",
                        lambda: client.create_database(parent, database["title"], properties, database.get("icon")),
-                       lambda created: mapping["databases"].update({key: created["id"]}))
+                       lambda created: mapping["databases"].update({key: created["id"]}),
+                       verify=lambda created: verify_created(client, created),
+                       idempotency_key=stable_key("database", mapping.get("template_key"), key, parent))
 
+    ensure_idempotency_schema(mapping, mapping_path, client)
     seed_default_rows(manifest, client, mapping, mapping_path)
 
     def render(key: str, blocks: List[Dict[str, Any]]) -> None:
@@ -931,6 +1243,13 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
     mapping["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     write_json(mapping_path, mapping)
     return mapping
+
+
+def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapping_path: Path) -> Dict[str, Any]:
+    """Install/reuse a template while holding both local write locks."""
+    normalized_parent = normalize_id(parent_id)
+    with operation_locks(mapping_path, normalized_parent, "install"):
+        return _install_unlocked(manifest, client, normalized_parent, mapping_path)
 
 
 def build_parser() -> argparse.ArgumentParser:

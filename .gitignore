@@ -4,6 +4,9 @@
 # Local Notion installer state and secrets
 .souvenir-install*.json
 ..souvenir-install*.json.*
+.souvenir-install*.lock
+.souvenir-workspace-*.lock
+.souvenir*.lock
 .env
 __pycache__/
 *.py[cod]

@@ -30,6 +30,19 @@ class FakeNotion:
     def get_page(self, page_id):
         return {"id": page_id}
 
+    def get_database(self, database_id):
+        for kind, _parent, properties, row_id in self.created:
+            if kind == "database" and row_id == database_id:
+                return {"id": row_id, "properties": copy.deepcopy(properties)}
+        return {"id": database_id, "properties": {ni.IDEMPOTENCY_PROPERTY: {"rich_text": {}}}}
+
+    def add_database_property(self, database_id, name):
+        for kind, _parent, properties, row_id in self.created:
+            if kind == "database" and row_id == database_id:
+                properties[name] = {"rich_text": {}}
+                return {"id": row_id, "properties": copy.deepcopy(properties)}
+        return {"id": database_id, "properties": {name: {"rich_text": {}}}}
+
     def create(self, kind, parent, payload):
         self.calls += 1
         if self.calls == self.fail_at:
@@ -46,6 +59,22 @@ class FakeNotion:
 
     def create_database_page(self, parent, properties):
         return self.create("row", parent, properties)
+
+    def query_database(self, database_id, payload=None):
+        payload = payload or {}
+        filter_value = payload.get("filter", {})
+        key = filter_value.get("rich_text", {}).get("equals")
+        if filter_value.get("property") != ni.IDEMPOTENCY_PROPERTY or key is None:
+            return []
+        matches = []
+        for kind, parent, properties, row_id in self.created:
+            if kind != "row" or parent != database_id:
+                continue
+            rich_text = properties.get(ni.IDEMPOTENCY_PROPERTY, {}).get("rich_text", [])
+            value = "".join(item.get("text", {}).get("content", "") for item in rich_text)
+            if value == key:
+                matches.append({"id": row_id})
+        return matches
 
     def append_blocks(self, page_id, blocks):
         self.calls += 1
@@ -81,6 +110,20 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.client.calls, calls)
         self.assertEqual(len(first["seeded_rows"]["task"]), 15)
         self.assertEqual(len(first["seeded_rows"]["packing"]), 8)
+
+    def test_old_install_is_migrated_with_idempotency_property(self):
+        self.install()
+        mapping = ni.read_json(self.path)
+        mapping.pop("idempotency_schema", None)
+        for kind, _parent, properties, _row_id in self.client.created:
+            if kind == "database":
+                properties.pop(ni.IDEMPOTENCY_PROPERTY, None)
+        ni.write_json(self.path, mapping)
+        self.install()
+        self.assertEqual(ni.read_json(self.path)["idempotency_schema"], 1)
+        for kind, _parent, properties, _row_id in self.client.created:
+            if kind == "database":
+                self.assertIn(ni.IDEMPOTENCY_PROPERTY, properties)
 
     def test_wrong_parent_or_template_never_writes(self):
         self.install()
@@ -156,6 +199,54 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ni.InstallerError, "저장 결과 확인"):
             self.scaffold()
         self.assertEqual(self.client.calls, calls)
+
+    def test_pending_operation_contains_owner_and_idempotency_key(self):
+        self.install()
+        self.client.fail_at = self.client.calls + 1
+        self.client.error = ni.UncertainWriteError("timeout after saving")
+        with self.assertRaises(ni.UncertainWriteError):
+            self.scaffold(traveler_count=0)
+        pending = ni.read_json(self.path)["pending_operation"]
+        self.assertIsInstance(pending, dict)
+        self.assertTrue(pending["operation_id"])
+        self.assertTrue(pending["idempotency_key"])
+
+    def test_same_mapping_is_locked_during_write(self):
+        with ni.operation_locks(self.path, PARENT, "test"):
+            with self.assertRaisesRegex(ni.InstallerError, "쓰기 작업이 진행 중"):
+                ni.install(self.manifest, self.client, PARENT, self.path)
+
+    def test_same_workspace_is_locked_across_mappings(self):
+        other = Path(self.tmp.name) / "other.json"
+        with ni.operation_locks(self.path, PARENT, "test"):
+            with self.assertRaisesRegex(ni.InstallerError, "쓰기 작업이 진행 중"):
+                ni.install(self.manifest, self.client, PARENT, other)
+
+    def test_duplicate_row_key_is_a_conflict(self):
+        self.install()
+        key = ni.stable_key("duplicate")
+        database_id = ni.read_json(self.path)["databases"]["trip"]
+        self.client.created.extend([
+            ("row", database_id, {ni.IDEMPOTENCY_PROPERTY: {"rich_text": [{"text": {"content": key}}]}}, "duplicate-1"),
+            ("row", database_id, {ni.IDEMPOTENCY_PROPERTY: {"rich_text": [{"text": {"content": key}}]}}, "duplicate-2"),
+        ])
+        with self.assertRaises(ni.ConflictError):
+            ni.find_existing_row(self.client, database_id, key)
+
+    def test_scaffold_reuses_rows_by_key_from_another_mapping(self):
+        self.install()
+        first = self.scaffold()
+        original_created = len(self.client.created)
+        second_path = Path(self.tmp.name) / "second.json"
+        mapping = ni.read_json(self.path)
+        mapping["scaffolded_trips"] = {}
+        ni.write_json(second_path, mapping)
+        second = ni.scaffold_trip(
+            self.manifest, self.client, second_path, "후쿠오카", "2026-12-12", "2026-12-15", None, 4, "JPY"
+        )
+        self.assertEqual(second["trip_id"], first["trip_id"])
+        self.assertEqual(second["itinerary"], first["itinerary"])
+        self.assertEqual(len(self.client.created), original_created)
 
     def test_duration_only_has_no_invented_dates(self):
         self.install()
@@ -326,6 +417,22 @@ class ClientTests(unittest.TestCase):
             with self.subTest(result=result), patch.object(ni.urllib.request, "urlopen", side_effect=[result]):
                 with self.assertRaises(ni.UncertainWriteError):
                     self.client.request("POST", "/pages", {})
+
+    def test_update_aborts_when_snapshot_is_stale(self):
+        current = self.response({"id": "page", "last_edited_time": "v2"})
+        with patch.object(ni.urllib.request, "urlopen", return_value=current) as request:
+            with self.assertRaises(ni.ConflictError):
+                self.client.update_page_properties("page", {"properties": {}}, expected_last_edited_time="v1")
+        self.assertEqual(request.call_count, 1)
+
+    def test_update_rereads_after_patch(self):
+        before = self.response({"id": "page", "last_edited_time": "v1"})
+        patched = self.response({"id": "page"})
+        after = self.response({"id": "page", "last_edited_time": "v2"})
+        with patch.object(ni.urllib.request, "urlopen", side_effect=[before, patched, after]) as request:
+            result = self.client.update_page_properties("page", {"Name": {"title": []}}, expected_last_edited_time="v1")
+        self.assertEqual(result["last_edited_time"], "v2")
+        self.assertEqual(request.call_count, 3)
 
     def test_append_blocks_chunks_at_100(self):
         blocks = [ni.text_block(str(index)) for index in range(205)]
