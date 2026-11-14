@@ -42,6 +42,17 @@ BLOCK_BATCH_SIZE = 100
 TEXT_LIMIT = 2000
 
 
+def configure_output() -> None:
+    """Keep Korean CLI output usable on Windows' legacy console encodings."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 class InstallerError(RuntimeError):
     """A user-facing installation error."""
 
@@ -970,4 +981,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_output()
     raise SystemExit(main())

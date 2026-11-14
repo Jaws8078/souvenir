@@ -14,6 +14,18 @@ REPOSITORY = "Jaws8078/souvenir"
 MARKETPLACE = "souvenir-marketplace"
 PLUGIN = "souvenir"
 
+
+def configure_output() -> None:
+    """Keep Korean CLI output usable on Windows' legacy console encodings."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 INSTALLERS: dict[str, dict[str, Any]] = {
     "codex": {
         "command": "codex",
@@ -156,4 +168,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_output()
     raise SystemExit(main())
