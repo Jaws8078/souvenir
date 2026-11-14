@@ -125,6 +125,13 @@ class TripEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.normalize_link("javascript:alert(1)")
 
+    def test_shopping_import_preserves_optional_fields(self):
+        rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")
+        self.assertEqual(rows[0]["품목"], "유자 킷캣")
+        self.assertEqual(rows[0]["담당 여행자"], "유성")
+        self.assertEqual(rows[0]["예상 금액"], 1200.0)
+        self.assertEqual(rows[0]["태그"], "디저트")
+
     def test_refresh_view_returns_today_next_deadlines_and_budget(self):
         view = engine.refresh_view(
             {"기준 통화": "JPY"},
@@ -136,11 +143,14 @@ class TripEngineTests(unittest.TestCase):
             wallets=[{"지갑": "공용", "통화": "JPY", "준비 금액": 1000}],
             expenses=[{"내역": "커피", "금액": 100, "통화": "JPY", "상태": "완료"}],
             now=datetime.fromisoformat("2026-12-12T09:00:00"),
+            shopping=[{"품목": "과자", "상태": "구매 예정"}, {"품목": "엽서", "상태": "구매 완료"}],
         )
         self.assertEqual([row["일정"] for row in view["today"]], ["오늘"])
         self.assertEqual(view["next"]["일정"], "오늘")
         self.assertEqual(view["budget"]["remaining"], 900)
         self.assertEqual(view["deadline_alerts"][0]["예약"], "티켓")
+        self.assertEqual(view["shopping"]["planned"], 1)
+        self.assertEqual(view["shopping"]["purchased"], 1)
 
     def test_notion_page_record_flattens_properties(self):
         page = {"id": "page-1", "properties": {

@@ -25,13 +25,14 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 URL_RE = re.compile(r"https?://[^\s|]+", re.I)
 
 ALIASES = {
-    "title": ("title", "이름", "일정", "예약", "숙소", "내역", "장소", "항공편", "자료", "지갑", "여행자", "분담", "송금", "할 일", "준비물", "예산 항목", "서비스", "이동 구간", "결정", "날씨 확인", "검사"),
+    "title": ("title", "이름", "일정", "예약", "숙소", "내역", "장소", "항공편", "자료", "지갑", "여행자", "분담", "송금", "할 일", "준비물", "예산 항목", "서비스", "이동 구간", "결정", "날씨 확인", "검사", "품목"),
     "travel_key": ("travel_key", "여행 키", "trip_id", "trip_key"),
     "date": ("date", "날짜", "이용 일시", "이용 날짜"),
     "start": ("start", "시작", "출발"),
     "end": ("end", "종료", "도착"),
     "day": ("day", "일차"),
     "place": ("place", "장소", "도착지"),
+    "shopping_place": ("shopping_place", "구매 장소", "쇼핑 장소"),
     "status": ("status", "상태", "예약 상태", "거래 상태", "숙소 상태"),
     "amount": ("amount", "금액", "사용액", "준비 금액", "결제액", "부담액", "예산"),
     "currency": ("currency", "통화", "예산 통화"),
@@ -203,6 +204,27 @@ def parse_place_lines(content: str) -> List[Dict[str, Any]]:
     return records
 
 
+def parse_shopping_lines(content: str) -> List[Dict[str, Any]]:
+    """Parse compact shopping rows without forcing optional fields."""
+    records: List[Dict[str, Any]] = []
+    for line in re.split(r"[\r\n]+", content):
+        cleaned = line.strip(" -*\t")
+        if not cleaned:
+            continue
+        fields = [part.strip() for part in re.split(r"\s*\|\s*", cleaned)]
+        record: Dict[str, Any] = {"품목": fields[0]}
+        names = ("담당 여행자", "구매 장소", "태그", "예상 금액", "결제 수단", "링크·메모")
+        for index, name in enumerate(names, start=1):
+            if len(fields) > index and fields[index]:
+                record[name] = fields[index]
+        if "예상 금액" in record:
+            parsed_amount = number(record["예상 금액"])
+            if parsed_amount is not None:
+                record["예상 금액"] = parsed_amount
+        records.append(record)
+    return records
+
+
 def normalize_link(url: str) -> Dict[str, str]:
     raw = text(url).strip("<>(),")
     parsed = urllib.parse.urlparse(raw)
@@ -265,7 +287,7 @@ def import_file(path: Path, kind: str = "auto") -> List[Dict[str, Any]]:
         loaded = json.loads(content)
         if isinstance(loaded, list):
             return [item for item in loaded if isinstance(item, dict)]
-        for key in ("records", "rows", "data", "itinerary", "expenses", "places"):
+        for key in ("records", "rows", "data", "itinerary", "expenses", "places", "shopping"):
             if isinstance(loaded, dict) and isinstance(loaded.get(key), list):
                 return [item for item in loaded[key] if isinstance(item, dict)]
         return [loaded] if isinstance(loaded, dict) else []
@@ -273,6 +295,8 @@ def import_file(path: Path, kind: str = "auto") -> List[Dict[str, Any]]:
         return parse_ics(content)
     if selected == "place":
         return parse_place_lines(content)
+    if selected == "shopping":
+        return parse_shopping_lines(content)
     if selected == "link":
         return [normalize_link(content.strip())]
     return organize_schedule(content)
@@ -462,7 +486,8 @@ def validate_trip(trip: Dict[str, Any], itinerary: Sequence[Dict[str, Any]] = ()
 def refresh_view(trip: Dict[str, Any], itinerary: Sequence[Dict[str, Any]],
                  reservations: Sequence[Dict[str, Any]] = (), stays: Sequence[Dict[str, Any]] = (),
                  wallets: Sequence[Dict[str, Any]] = (), expenses: Sequence[Dict[str, Any]] = (),
-                 now: Optional[dt.datetime] = None) -> Dict[str, Any]:
+                 now: Optional[dt.datetime] = None,
+                 shopping: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     current = now or dt.datetime.now()
     events = [(event_datetime(row, "start") or parse_datetime(value(row, "date")), row)
               for row in itinerary if active(row)]
@@ -480,9 +505,14 @@ def refresh_view(trip: Dict[str, Any], itinerary: Sequence[Dict[str, Any]],
                                       "남은 일수": round((deadline - current).total_seconds() / 86400, 1)})
     deadlines.sort(key=lambda item: item["기한"])
     budget = calculate_budget(wallets, expenses, base_currency=text(trip.get("기준 통화") or "KRW"))
+    shopping_rows = [row for row in shopping if active(row)]
+    shopping_summary = {"items": shopping_rows,
+                        "planned": sum(text(value(row, "status")) in {"아이디어", "구매 예정", "보류", ""}
+                                        for row in shopping_rows),
+                        "purchased": sum(text(value(row, "status")) == "구매 완료" for row in shopping_rows)}
     return {"date": current.date().isoformat(), "today": today,
             "next": next_event, "confirmed_stays": [row for row in stays if text(value(row, "status")) == "확정"],
-            "deadline_alerts": deadlines[:10], "budget": budget}
+            "deadline_alerts": deadlines[:10], "budget": budget, "shopping": shopping_summary}
 
 
 def notion_page_record(page: Dict[str, Any]) -> Dict[str, Any]:
@@ -517,7 +547,7 @@ def load_notion_snapshot(client: Any, mapping: Dict[str, Any], trip_id: str) -> 
     """Read only the DBs needed by checks, budget, and travel-mode refresh."""
     trip_page = notion_page_record(client.get_page(trip_id))
     keys = {"itinerary": "itinerary", "reservation": "reservation", "stay": "stay",
-            "wallet": "wallet", "expense": "expense", "place": "place"}
+            "wallet": "wallet", "expense": "expense", "place": "place", "shopping": "shopping"}
     snapshot: Dict[str, Any] = {"trip": trip_page}
     for output_key, database_key in keys.items():
         database_id = (mapping.get("databases") or {}).get(database_key)
@@ -540,7 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir Python travel engine")
     parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh"])
     parser.add_argument("--input", type=Path, help="JSON 스냅샷 또는 가져올 파일")
-    parser.add_argument("--kind", choices=["auto", "itinerary", "place", "link", "csv", "json", "ics", "expense"], default="auto")
+    parser.add_argument("--kind", choices=["auto", "itinerary", "place", "shopping", "link", "csv", "json", "ics", "expense"], default="auto")
     parser.add_argument("--text", help="organize/import에서 직접 받을 텍스트")
     parser.add_argument("--start-date", help="일정 텍스트의 출발일 YYYY-MM-DD")
     parser.add_argument("--duration-days", type=int, help="일정 텍스트의 여행 일수")
@@ -594,6 +624,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     result = organize_schedule(content, args.start_date, args.duration_days)
                 elif args.kind == "place":
                     result = parse_place_lines(content)
+                elif args.kind == "shopping":
+                    result = parse_shopping_lines(content)
                 elif args.kind == "link":
                     result = normalize_link(content)
                 elif args.kind == "ics":
@@ -620,7 +652,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 result = refresh_view(source.get("trip", {}), source.get("itinerary", []),
                                       source.get("reservation", []), source.get("stay", []),
-                                      source.get("wallet", []), source.get("expense", []), now)
+                                      source.get("wallet", []), source.get("expense", []), now,
+                                      source.get("shopping", []))
         print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
         return 0
     except (OSError, ValueError, KeyError) as exc:
