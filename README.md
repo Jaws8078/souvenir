@@ -1,10 +1,39 @@
-# Souvenir
+<p align="center">
+  <img src="assets/souvenir-icon.png" alt="Souvenir icon" width="176" />
+</p>
 
-![Souvenir 공통 배너](assets/souvenir-cover.png)
+<h1 align="center">Souvenir · 여행 도우미</h1>
 
-**여행은 한눈에, 작성은 간단하게.**
+<hr />
 
-Notion 연결을 사용해 여행 플래너를 만들고 계획을 수정하는 **Codex·ChatGPT용 플러그인/스킬**이에요. 사진·카드·색상으로 보기 좋게 정리하고, 작성할 때는 필요한 항목만 보여줘요.
+<p align="center"><strong>여행은 한눈에, 작성은 간단하게.</strong></p>
+
+<p align="center">Notion과 연결해 여행 계획부터 여행 중 확인까지 이어가는 Codex · ChatGPT 플러그인</p>
+
+<p align="center"><strong>검색어:</strong> Souvenir AI Skill · 여행 플래너 Skill · Notion travel planner · itinerary assistant</p>
+
+<p align="center">
+  <strong>Codex Skill</strong> ·
+  <strong>Claude Code Skill</strong> ·
+  <strong>Gemini Skill</strong> ·
+  <strong>Notion</strong> ·
+  <strong>local executor</strong>
+</p>
+
+<p align="center">
+  <a href="#빠른-시작">빠른 시작</a> ·
+  <a href="#파트별-계획-마법사">핵심 기능</a> ·
+  <a href="#python-여행-엔진과-로컬-자동-호출">자동화 자세히 보기</a> ·
+  <a href="docs/implementation-notes.md">개발자 정보</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Notion-connected-2F5D8A?style=flat-square" alt="Notion connected" />
+  <img src="https://img.shields.io/badge/local-first-2D6A4F?style=flat-square" alt="Local first" />
+  <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.9 or newer" />
+</p>
+
+<p align="center"><em>목적지와 날짜 또는 기간만 입력하면, 나머지는 대화로 함께 완성합니다.</em></p>
 
 ## 빠른 시작
 
