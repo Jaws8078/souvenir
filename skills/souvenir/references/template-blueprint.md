@@ -2,7 +2,7 @@
 
 이 문서는 원본 Notion 페이지 링크 없이 Souvenir 템플릿을 대상 워크스페이스에 재생성하기 위한 설계도다. **원본 페이지·데이터베이스 ID를 복사하지 않는다.** 설치 중 생성된 대상 워크스페이스의 URL과 ID를 설치 기록에 저장한다.
 
-> 이 청사진과 `template-manifest.json`은 Marketplace 템플릿을 사용할 수 없을 때의 fallback이다. 디자인의 기준은 Notion Marketplace 배포용 템플릿이며, 템플릿을 먼저 수정한 뒤 청사진·스킬·설치기를 그 구조에 맞춰 갱신한다.
+> 이 청사진과 `template-manifest.json`은 공개 링크 템플릿을 사용할 수 없을 때의 fallback이다. 디자인의 기준은 Notion 링크 배포본이며, 템플릿을 먼저 수정한 뒤 청사진·스킬·설치기를 그 구조에 맞춰 갱신한다.
 
 ## 설치 원칙
 
@@ -20,7 +20,7 @@
 
 ## 링크 없이 설치하는 코드 경로
 
-공개·복제 가능한 템플릿 링크가 있으면 Notion의 `복제`가 가장 충실하다. 링크가 없거나 사용자가 직접 재구축을 선택하면 `skills/souvenir/scripts/notion_installer.py`가 `assets/template-manifest.json`을 읽어 대상 워크스페이스에 새 대시보드·네 묶음 페이지·20개 핵심 데이터베이스를 만든다.
+공개·복제 가능한 Notion 페이지 링크가 있으면 Notion의 `복제`가 가장 충실하다. 링크가 없거나 사용자가 직접 재구축을 선택하면 `skills/souvenir/scripts/notion_installer.py`가 `assets/template-manifest.json`을 읽어 대상 워크스페이스에 새 대시보드·네 묶음 페이지·20개 핵심 데이터베이스를 만든다.
 
 ```bash
 python3 skills/souvenir/scripts/notion_installer.py validate

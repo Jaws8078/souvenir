@@ -1,7 +1,7 @@
 {
-  "source": "notion_marketplace",
+  "source": "public_notion_link",
   "template_url": null,
   "copy_required": true,
   "fallback": "blueprint_rebuild",
-  "notes": "Notion Marketplace에 공개·복제 가능한 Souvenir 템플릿을 등록한 뒤 template_url에 링크를 입력하세요. 링크가 없거나 복제를 승인하지 않으면 내장 청사진을 보조 경로로 사용합니다."
+  "notes": "개인 데이터가 제거된 Notion 배포본을 공개하고 '복제 허용'을 켠 뒤 template_url에 링크를 입력하세요. 마켓 등록은 필요하지 않습니다. 링크가 없거나 복제를 승인하지 않으면 내장 청사진을 보조 경로로 사용합니다."
 }

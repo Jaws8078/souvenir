@@ -8,7 +8,7 @@
   "original_page_ids_included": false,
   "distribution": {
     "public_template_url_env": "SOUVENIR_TEMPLATE_URL",
-    "primary_route": "notion_marketplace_duplicate",
+    "primary_route": "public_notion_link_duplicate",
     "duplicate_requires_user_approval": true,
     "code_rebuild_is_fallback": true
   },
