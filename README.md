@@ -6,42 +6,34 @@
 
 Notion 연결을 사용해 여행 플래너를 만들고 계획을 수정하는 **Codex·ChatGPT용 플러그인/스킬**이에요. 사진·카드·색상으로 보기 좋게 정리하고, 작성할 때는 필요한 항목만 보여줘요.
 
-## 처음 설치하기
+## 빠른 시작
 
-Souvenir는 별도 프로그램이 아니라 **플러그인으로 설치하거나 Codex 프로젝트에서 바로 불러 쓰는 여행 도우미**예요. 기본 사용에는 Python·TypeScript·npm이 필요하지 않지만, 다른 워크스페이스에 구조를 코드로 재구축하고 싶다면 저장소에 포함된 선택형 Python 설치기를 사용할 수 있어요.
+Souvenir는 별도 앱이 아니라 **Notion 연결을 사용하는 로컬 실행형 플러그인/스킬**이에요. 처음 한 번 플러그인을 설치하고 Notion 워크스페이스를 연결하면, 이후에는 사용자가 명령어나 Python 코드를 입력하지 않고 여행을 자연어로 관리할 수 있어요.
 
-가장 쉬운 방법은 플러그인 설치예요. 플러그인을 설치할 수 없는 환경에서는 저장소를 직접 열어도 같은 스킬을 사용할 수 있어요.
+### 1. Codex에 설치하기 (권장)
 
-### 터틀넥 방식 빠른 시작
-
-저장소나 플러그인 패키지가 이미 열려 있는 환경에서는 설치기를 먼저 실행해 현재 환경만 확인할 수 있어요. 기본 실행은 설치하지 않는 점검 모드예요.
-
-```bash
-python3 skills/souvenir/scripts/install_souvenir.py
-```
-
-출력된 환경을 확인하고 실제 Codex 등록을 승인할 때만 `--apply`를 붙여요.
-
-```bash
-python3 skills/souvenir/scripts/install_souvenir.py --apply
-```
-
-설치기는 Codex CLI가 있을 때만 공식 마켓플레이스 등록·플러그인 설치·목록 검증을 실행해요. ChatGPT 데스크톱은 Plugins Directory에서 직접 설치해야 하며, 설치기에서 비밀번호·쿠키·Notion 토큰을 읽지 않아요. 설치가 끝난 뒤에는 새 채팅에서 `$souvenir` 또는 `@Souvenir 설치 시작` 한 문장으로 온보딩을 시작할 수 있어요.
-
-### 방법 A · 플러그인으로 설치하기 (권장)
-
-#### Codex CLI에서 마켓플레이스 등록
-
-Codex CLI에서는 터틀넥과 같은 두 단계 흐름으로 마켓플레이스를 등록하고 플러그인을 설치해요. 위 설치기를 사용하면 아래 명령을 자동으로 순서대로 실행할 수 있어요.
+Codex CLI에서 아래 두 명령을 한 번만 실행해요.
 
 ```bash
 codex plugin marketplace add Jaws8078/souvenir --ref main
 codex plugin add souvenir@souvenir-marketplace
 ```
 
-설치가 끝나면 새 Codex 채팅을 열고 `$souvenir`를 입력해요. 이미 등록한 마켓플레이스는 다음부터 다시 등록할 필요가 없어요.
+설치가 끝나면 새 채팅에서 아래처럼 호출해요.
 
-#### ChatGPT 데스크톱에서 설치
+```text
+$souvenir
+```
+
+또는 아래처럼 바로 요청해도 돼요.
+
+```text
+Souvenir로 후쿠오카 3박 4일 여행 계획을 시작해줘.
+```
+
+플러그인은 `requires_local_executor`를 사용하므로, 로컬 실행기를 지원하는 Codex·Claude Code·Gemini에서는 일정 검사·예산 계산·여행 중 새로고침을 내부적으로 실행해요. 사용자가 `python3` 명령을 직접 입력할 필요는 없어요.
+
+### 2. ChatGPT 데스크톱에 설치하기
 
 1. Plugins Directory를 열어요.
 2. `Add Marketplace` 또는 `Add from repository`를 선택해요.
@@ -49,7 +41,40 @@ codex plugin add souvenir@souvenir-marketplace
 4. **Souvenir**를 설치하고 새 Work 채팅을 시작해요.
 5. 입력창에서 `@`를 눌러 **Souvenir**를 선택하거나 표시되는 시작 문구를 사용해요.
 
-플러그인은 스킬·내장 템플릿·시작 문구를 묶어 설치하지만, Notion 계정과 워크스페이스 권한은 각 사용자가 별도로 연결해야 해요.
+ChatGPT 웹·모바일처럼 로컬 실행기를 제공하지 않는 환경에서는 Notion 플러그인과 대화형 계획 기능을 사용할 수 있지만, Python 엔진 자동 호출은 지원되지 않아요.
+
+### 3. Notion을 한 번 연결하기
+
+첫 `$souvenir` 호출 때 Souvenir가 연결 상태를 확인해요.
+
+1. Notion 연결 화면에서 로그인하고 워크스페이스 권한을 승인해요.
+2. 템플릿 설치 여부를 확인해요.
+3. Marketplace 템플릿을 사용한다면 Notion에서 한 번 `복제`해요.
+4. Souvenir가 복제된 페이지와 데이터베이스를 연결해요.
+
+비밀번호·쿠키·Notion 토큰을 채팅에 입력하지 않아요. 플러그인 설치와 Notion 템플릿 복제는 워크스페이스마다 한 번씩 필요해요.
+
+### 자동 설치기를 사용하는 경우 (선택)
+
+저장소 폴더를 이미 열었거나 Codex CLI가 있는 환경에서는 설치기가 현재 환경만 확인하고, 사용자가 선택한 경우에만 등록을 실행해요.
+
+```bash
+python3 skills/souvenir/scripts/install_souvenir.py
+python3 skills/souvenir/scripts/install_souvenir.py --apply
+```
+
+설치기는 비밀번호·쿠키·Notion 토큰을 읽지 않아요. 설치 후에는 새 채팅에서 `$souvenir`를 호출하면 돼요.
+
+### 플러그인을 설치할 수 없는 환경
+
+저장소를 직접 열어도 같은 스킬을 사용할 수 있어요.
+
+```bash
+git clone https://github.com/Jaws8078/souvenir.git
+cd souvenir
+```
+
+Codex에서 `souvenir` 폴더를 프로젝트로 열고 새 채팅에서 `$souvenir`를 호출해요. 저장소 안의 `.agents/skills/souvenir/SKILL.md`가 공통 스킬을 가리켜요.
 
 ### 플러그인 설치 후 첫 실행
 
@@ -59,7 +84,7 @@ Notion 템플릿을 Marketplace에 등록하면 **플러그인 관리자가** [`
 
 플러그인 설치와 Notion 템플릿 복제는 별개예요. 플러그인은 한 번 설치하면 새 채팅에서 재사용할 수 있지만, 각 Notion 워크스페이스의 연결·로그인·최초 복제 승인은 사용자가 한 번 진행해야 해요.
 
-### 방법 B · 저장소를 직접 열기
+### 저장소 직접 열기 상세 단계
 
 플러그인 설치가 표시되지 않는 환경에서는 아래 방식으로 사용해요.
 
@@ -342,7 +367,7 @@ Souvenir가 임의로 비밀번호를 받거나 브라우저를 조작하지는 
 - 저장된 레이아웃, 입력 구역의 속성 유형, 여행·취소·제외 필터를 다시 확인했어요. 실제 앱·모바일 렌더링 검수는 남아 있어요.
 - 환율·날씨·운영 정보는 자동 조회되지 않아요. 미확인 정보는 확인 필요로 남겨요.
 - 무료 환경을 고려해 네이티브 차트는 새로 만들지 않아요. 이전 예산 DB의 차트 탭 1개는 삭제 도구/앱 입력 문제로 남아 있어요.
-- 플러그인 매니페스트·저장소 마켓플레이스·세 개의 시작 문구를 추가했어요. 실제 ChatGPT/Codex 데스크톱의 표시 위치와 클릭 후 동작은 설치 환경에서 한 번 더 확인해야 해요.
+- 플러그인 매니페스트·저장소 마켓플레이스·시작 문구를 추가했어요. 실제 ChatGPT/Codex 데스크톱의 표시 위치와 클릭 후 동작은 설치 환경에서 한 번 더 확인해야 해요.
 
 기본 스킬은 새 의존성 없이 동작하고, 코드 설치기는 Python 3.9 이상과 표준 라이브러리만 사용해요. 기존 구현·계산 검증·남은 제약은 [구현 기록](docs/implementation-notes.md)에 보존했어요. 공통 규칙은 [SKILL.md](skills/souvenir/SKILL.md) 한 곳에서 관리하고, `.agents/skills/souvenir`는 저장소 로컬 진입점으로 연결돼요. 온보딩·예산·준비·검증 등 상세 규칙은 해당 작업 때만 읽어서 매번 전체 설명을 불러오지 않아요. 입력 설계는 [간편 입력 규칙](skills/souvenir/references/input-design.md), 코드 설치 설계는 [템플릿 청사진](skills/souvenir/references/template-blueprint.md)에서 볼 수 있어요.
 
