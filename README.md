@@ -265,6 +265,8 @@ python3 skills/souvenir/scripts/notion_installer.py scaffold \
 
 ## 업데이트하기
 
+동시 작업 보호 계획과 P0·P1·P2 구현 범위는 [동시성 대응 메모](docs/concurrency-roadmap.md)에 정리해요.
+
 Git clone으로 설치했다면 저장소 폴더에서 실행해요.
 
 ```bash
