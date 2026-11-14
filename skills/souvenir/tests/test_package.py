@@ -29,6 +29,8 @@ class PackageTests(unittest.TestCase):
                        extension["interface"]["composerIcon"]):
             self.assertTrue((ROOT / target).is_file())
         self.assertTrue((PACKAGE / "scripts" / "run_souvenir.py").is_file())
+        self.assertTrue((PACKAGE / "agents" / "openai.yaml").is_file())
+        self.assertTrue((PACKAGE / "assets" / "souvenir-icon.png").is_file())
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8"))
         self.assertEqual(marketplace["plugins"][0]["name"], plugin["name"])
 

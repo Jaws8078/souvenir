@@ -1,0 +1,7 @@
+interface:
+  display_name: "Souvenir"
+  short_description: "Notion 여행 계획을 만들고 여행 중 확인까지 이어주는 Skill"
+  icon_small: "./assets/souvenir-icon.png"
+  icon_large: "./assets/souvenir-icon.png"
+  brand_color: "#2F5D8A"
+  default_prompt: "$souvenir로 Notion 여행 계획을 시작하고 다음 단계를 안내받으세요."
