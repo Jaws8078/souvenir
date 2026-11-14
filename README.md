@@ -155,7 +155,11 @@ python3 skills/souvenir/scripts/notion_installer.py scaffold \
   --pretty
 ```
 
-날짜 대신 `--duration-days 4`를 사용할 수도 있어요. 같은 목적지·기간·인원·통화 조합을 다시 실행하면 설치 기록의 기존 결과를 재사용해 중복 행을 만들지 않아요. 이 명령은 Marketplace 템플릿을 대체하지 않고, 링크를 사용할 수 없는 환경을 위한 API fallback이에요.
+날짜 대신 `--duration-days 4`를 사용할 수도 있어요. 출발일과 기간을 함께 주면 종료일을 계산하고, 기간만 주면 실제 날짜는 비워 둬요. 같은 목적지·날짜·기간·인원·통화·여행 이름으로 다시 실행하면 저장된 결과를 재사용해요. 같은 조건으로 별도 여행을 만들려면 `--trip-name`을 다르게 지정하세요. 이 명령은 Marketplace 템플릿을 대체하지 않고, 링크를 사용할 수 없는 환경을 위한 API fallback이에요.
+
+설치·여행 생성은 성공한 페이지·행·본문 묶음마다 기록을 저장해요. 확실히 실패한 요청은 다음 실행에서 해당 지점부터 재개하고, 통신 중단처럼 저장 여부가 불분명한 요청은 `pending_operation`을 남기고 멈춰요. 이때는 대상 Notion에서 실제 생성 여부를 확인해 매핑을 복구한 뒤 재개해야 해요. 설치 기록을 지우고 다시 실행하면 중복 생성될 수 있어요.
+
+워크스페이스나 상위 페이지가 다르면 `--mapping .souvenir-install-other.json`처럼 별도 파일을 사용하세요. 같은 매핑으로 여러 설치 프로세스를 동시에 실행하지 마세요. 설치 중 매니페스트가 달라지면 원래 버전으로 재개하거나 새 매핑을 사용해요. 매핑 파일은 개인별 생성 ID와 여행 입력값을 담으므로 Git에 올리지 않아요.
 
 이 경로는 대시보드·네 묶음·20개 핵심 데이터베이스·입력 속성을 재생성해요. Notion의 네이티브 `복제`처럼 원본의 모든 관계·수식·뷰 배치·커버를 픽셀 단위로 보존하는 방식은 아니므로, 설치 후 Souvenir가 대상 워크스페이스에서 상세 뷰와 계산을 이어서 구성해요. 최고 충실도가 필요하면 공개·복제 가능한 Marketplace 템플릿에서 사용자가 직접 `Add` 또는 `Duplicate`하는 방법을 우선해요.
 
@@ -320,4 +324,19 @@ Souvenir가 임의로 비밀번호를 받거나 브라우저를 조작하지는 
 - 무료 환경을 고려해 네이티브 차트는 새로 만들지 않아요. 이전 예산 DB의 차트 탭 1개는 삭제 도구/앱 입력 문제로 남아 있어요.
 - 플러그인 매니페스트·저장소 마켓플레이스·세 개의 시작 문구를 추가했어요. 실제 ChatGPT/Codex 데스크톱의 표시 위치와 클릭 후 동작은 설치 환경에서 한 번 더 확인해야 해요.
 
-기본 스킬은 새 의존성 없이 동작하고, 코드 설치기는 Python 표준 라이브러리만 사용해요. 기존 구현·계산 검증·남은 제약은 [구현 기록](docs/implementation-notes.md)에 보존했어요. 스킬 규칙은 [SKILL.md](.agents/skills/souvenir/SKILL.md), 입력 설계는 [간편 입력 규칙](.agents/skills/souvenir/references/input-design.md), 코드 설치 설계는 [템플릿 청사진](skills/souvenir/references/template-blueprint.md)에서 볼 수 있어요.
+기본 스킬은 새 의존성 없이 동작하고, 코드 설치기는 Python 3.9 이상과 표준 라이브러리만 사용해요. 기존 구현·계산 검증·남은 제약은 [구현 기록](docs/implementation-notes.md)에 보존했어요. 공통 규칙은 [SKILL.md](skills/souvenir/SKILL.md) 한 곳에서 관리하고, `.agents/skills/souvenir`는 저장소 로컬 진입점으로 연결돼요. 온보딩·예산·준비·검증 등 상세 규칙은 해당 작업 때만 읽어서 매번 전체 설명을 불러오지 않아요. 입력 설계는 [간편 입력 규칙](skills/souvenir/references/input-design.md), 코드 설치 설계는 [템플릿 청사진](skills/souvenir/references/template-blueprint.md)에서 볼 수 있어요.
+
+### 개발·검증
+
+아래 검증은 실제 Notion 쓰기나 플러그인 설치 없이 실행돼요.
+
+```bash
+python3 -m unittest discover -s skills/souvenir/tests -v
+python3 skills/souvenir/scripts/notion_installer.py validate
+python3 skills/souvenir/scripts/notion_installer.py plan --pretty
+python3 skills/souvenir/scripts/install_souvenir.py
+```
+
+테스트는 중단 후 재개, 중복 생성 방지, 다른 설치 대상 혼용 방지, 날짜·통화 입력, API 오류·재시도, 긴 텍스트·블록 분할, 스킬 문서 연결을 확인해요. GitHub Actions는 Linux·Windows의 Python 3.9·3.13에서 같은 검증을 실행해요. 이 검증은 Notion의 실제 복제·화면 렌더링·수식 계산을 검증한 결과와 구분해요.
+
+API 요청 제한 처리는 [Notion 공식 문서](https://developers.notion.com/reference/request-limits)를 따라요. 429·529는 대기 지시를 존중해 제한적으로 재시도하고, 저장 여부가 불분명한 쓰기 요청은 자동 재전송하지 않아요.

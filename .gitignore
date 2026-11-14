@@ -2,7 +2,8 @@
 /ex
 
 # Local Notion installer state and secrets
-.souvenir-install.json
+.souvenir-install*.json
+..souvenir-install*.json.*
 .env
 __pycache__/
 *.py[cod]

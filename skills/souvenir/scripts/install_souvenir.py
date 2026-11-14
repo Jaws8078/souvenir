@@ -6,6 +6,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 
@@ -28,7 +29,7 @@ INSTALLERS: dict[str, dict[str, Any]] = {
 def detect() -> dict[str, Any]:
     """Return environment facts without installing anything or reading secrets."""
     return {
-        "python": bool(shutil.which("python3") or shutil.which("python") or shutil.which("py")),
+        "python": bool(sys.executable),
         "agents": {
             name: {"installed": bool(shutil.which(item["command"]))}
             for name, item in INSTALLERS.items()
@@ -46,13 +47,17 @@ def _run(command: list[str]) -> tuple[bool, str]:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
         return False, str(error)
 
-    output = (result.stdout or result.stderr or "").strip().splitlines()
+    # Errors commonly go to stderr while stdout still contains progress text.
+    stream = (result.stdout or result.stderr) if result.returncode == 0 else (result.stderr or result.stdout)
+    output = (stream or "").strip().splitlines()
     return result.returncode == 0, output[-1] if output else ""
 
 
@@ -102,9 +107,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     state = detect()
-    selected = args.agent or [
+    selected = list(dict.fromkeys(args.agent or [
         name for name, item in state["agents"].items() if item["installed"]
-    ]
+    ]))
 
     if not args.apply:
         print(

@@ -1,0 +1,27 @@
+name: Check Souvenir
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Offline regression tests
+        run: python -m unittest discover -s skills/souvenir/tests -v
+      - name: Validate fallback manifest
+        run: python skills/souvenir/scripts/notion_installer.py validate
+      - name: Preview fallback plan
+        run: python skills/souvenir/scripts/notion_installer.py plan
+      - name: Check installation environment without installing
+        run: python skills/souvenir/scripts/install_souvenir.py

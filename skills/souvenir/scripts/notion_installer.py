@@ -18,25 +18,36 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
+import http.client
 import json
+import math
 import os
+import random
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "assets" / "template-manifest.json"
 DEFAULT_MAPPING = Path(".souvenir-install.json")
 UUID_RE = re.compile(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", re.I)
+BLOCK_BATCH_SIZE = 100
+TEXT_LIMIT = 2000
 
 
 class InstallerError(RuntimeError):
     """A user-facing installation error."""
+
+
+class UncertainWriteError(InstallerError):
+    """The server may have saved a write; inspect it before replaying it."""
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -45,18 +56,69 @@ def read_json(path: Path) -> Dict[str, Any]:
             value = json.load(handle)
     except FileNotFoundError as exc:
         raise InstallerError(f"파일을 찾을 수 없습니다: {path}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeError) as exc:
         raise InstallerError(f"JSON 형식이 올바르지 않습니다: {path} ({exc})") from exc
+    except OSError as exc:
+        raise InstallerError(f"파일을 읽지 못했습니다: {path} ({exc})") from exc
     if not isinstance(value, dict):
-        raise InstallerError("매니페스트 최상위 값은 객체여야 합니다.")
+        raise InstallerError(f"JSON 최상위 값은 객체여야 합니다: {path}")
     return value
 
 
 def write_json(path: Path, value: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+    """Replace the checkpoint atomically; a failed write keeps the last good file."""
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(value, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except (OSError, ValueError) as exc:
+        raise InstallerError(f"설치 기록을 저장하지 못했습니다: {path} ({exc})") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def check_pending(mapping: Dict[str, Any]) -> None:
+    if mapping.get("pending_operation"):
+        raise InstallerError(
+            f"저장 결과 확인이 필요한 작업이 있습니다: {mapping['pending_operation']}. "
+            "대상 Notion에서 생성 여부를 확인하고 매핑을 복구한 뒤 재개하세요. "
+            "확인 없이 설치 기록을 지우면 중복 생성될 수 있습니다."
+        )
+
+
+def check_manifest_version(mapping: Dict[str, Any], manifest: Dict[str, Any]) -> None:
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if mapping.get("manifest_digest") not in (None, digest):
+        raise InstallerError("설치 당시와 매니페스트가 다릅니다. 기존 버전으로 재개하거나 새 --mapping을 지정하세요.")
+    mapping["manifest_digest"] = digest
+
+
+def recorded_write(mapping: Dict[str, Any], path: Path, key: str,
+                   action: Callable[[], Any], record: Callable[[Any], None]) -> None:
+    """Journal a remote mutation and checkpoint its result before proceeding."""
+    check_pending(mapping)
+    mapping["pending_operation"] = key
+    write_json(path, mapping)
+    try:
+        result = action()
+    except UncertainWriteError:
+        raise
+    except InstallerError:
+        # A definite rejection (e.g. 400/401/429) is safe to resume later.
+        mapping.pop("pending_operation")
+        write_json(path, mapping)
+        raise
+    record(result)
+    mapping.pop("pending_operation")
+    write_json(path, mapping)
 
 
 def iter_strings(value: Any) -> Iterable[str]:
@@ -78,34 +140,110 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
     databases = manifest.get("databases")
     if not isinstance(pages, list) or not pages:
         errors.append("pages가 비어 있습니다.")
+        pages = []
     if not isinstance(databases, list) or not databases:
         errors.append("databases가 비어 있습니다.")
-    page_keys = {item.get("key") for item in pages or [] if isinstance(item, dict)}
-    db_keys = {item.get("key") for item in databases or [] if isinstance(item, dict)}
+        databases = []
+
+    def valid_key(item: Any) -> bool:
+        return isinstance(item, dict) and isinstance(item.get("key"), str) and bool(item["key"].strip())
+
+    page_keys = {item["key"] for item in pages if valid_key(item)}
+    db_keys = {item["key"] for item in databases if valid_key(item)}
     if len(page_keys) != len(pages or []):
         errors.append("페이지 key가 중복되었거나 빠졌습니다.")
     if len(db_keys) != len(databases or []):
         errors.append("데이터베이스 key가 중복되었거나 빠졌습니다.")
+    if "dashboard" not in page_keys:
+        errors.append("dashboard 페이지가 필요합니다.")
+    if "target" in page_keys:
+        errors.append("페이지 key에 예약어 target은 사용할 수 없습니다.")
+    if not isinstance(manifest.get("template_key"), str) or not manifest["template_key"].strip():
+        errors.append("template_key가 필요합니다.")
     for page in pages or []:
         if not isinstance(page, dict):
             errors.append("페이지 항목은 객체여야 합니다.")
             continue
         parent = page.get("parent")
-        if parent not in {"target", *page_keys}:
+        if not isinstance(parent, str) or parent not in {"target", *page_keys}:
             errors.append(f"페이지 {page.get('key')}의 parent를 찾을 수 없습니다: {parent}")
+        if not isinstance(page.get("title"), str) or not page["title"].strip():
+            errors.append(f"페이지 {page.get('key')}에 title이 필요합니다.")
+        for field, targets in (("children", page_keys), ("database_keys", db_keys)):
+            references = page.get(field, [])
+            if not isinstance(references, list) or any(not isinstance(key, str) or key not in targets for key in references):
+                errors.append(f"페이지 {page.get('key')}의 {field} 연결이 올바르지 않습니다.")
+        for field in ("sections", "cards"):
+            entries = page.get(field, [])
+            if not isinstance(entries, list):
+                errors.append(f"페이지 {page.get('key')}의 {field}는 배열이어야 합니다.")
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    errors.append(f"페이지 {page.get('key')}의 {field} 항목은 객체여야 합니다.")
+                    continue
+                kind = entry.get("kind") if field == "sections" else "card"
+                required = {"callout": ("title", "body"), "heading": ("text",),
+                            "links": ("title",), "card": ("title",)}
+                if not isinstance(kind, str) or kind not in required:
+                    errors.append(f"지원하지 않는 페이지 섹션: {kind}")
+                    continue
+                if any(not isinstance(entry.get(name), str) for name in required[kind]):
+                    errors.append(f"페이지 {page.get('key')}의 {kind}에 필요한 텍스트가 없습니다.")
+                if kind == "links":
+                    targets = entry.get("targets", [])
+                    if not isinstance(targets, list) or any(not isinstance(key, str) or key not in page_keys | db_keys for key in targets):
+                        errors.append(f"페이지 {page.get('key')}의 links 대상이 올바르지 않습니다.")
+                if kind == "card" and (not isinstance(entry.get("database_key"), str) or entry["database_key"] not in db_keys):
+                    errors.append(f"페이지 {page.get('key')}의 카드 DB를 찾을 수 없습니다.")
+    parents = {page["key"]: page.get("parent") for page in pages if valid_key(page)}
+    checked = set()
+    for key in parents:
+        chain = set()
+        while isinstance(key, str) and key in parents and key not in checked:
+            if key in chain:
+                errors.append(f"페이지 parent에 순환 연결이 있습니다: {key}")
+                break
+            chain.add(key)
+            key = parents[key]
+        checked.update(chain)
     for database in databases or []:
         if not isinstance(database, dict):
             errors.append("데이터베이스 항목은 객체여야 합니다.")
             continue
-        if database.get("parent") not in page_keys:
+        if not isinstance(database.get("parent"), str) or database["parent"] not in page_keys:
             errors.append(f"데이터베이스 {database.get('key')}의 parent를 찾을 수 없습니다.")
-        properties = database.get("properties")
-        if not isinstance(properties, list) or not any(p.get("type") == "title" for p in properties if isinstance(p, dict)):
-            # The installer inserts a title property from title_property, so this is informational.
-            if not database.get("title_property"):
-                errors.append(f"데이터베이스 {database.get('key')}에 title_property가 없습니다.")
+        for field in ("title", "title_property"):
+            if not isinstance(database.get(field), str) or not database[field].strip():
+                errors.append(f"데이터베이스 {database.get('key')}에 {field}가 필요합니다.")
+        properties = database.get("properties", [])
+        if not isinstance(properties, list):
+            errors.append(f"데이터베이스 {database.get('key')}의 properties는 배열이어야 합니다.")
+            continue
+        names = set()
+        for prop in properties:
+            if not isinstance(prop, dict) or not isinstance(prop.get("name"), str) or not prop["name"].strip():
+                errors.append(f"데이터베이스 {database.get('key')}의 속성 name이 올바르지 않습니다.")
+                continue
+            if prop["name"] in names:
+                errors.append(f"중복 속성: {database.get('key')}.{prop['name']}")
+            names.add(prop["name"])
+            if not isinstance(prop.get("type"), str):
+                errors.append(f"속성 type이 올바르지 않습니다: {prop['name']}")
+                continue
+            if prop.get("type") == "title" and prop["name"] != database.get("title_property"):
+                errors.append(f"제목 속성은 하나만 지정하세요: {database.get('key')}")
+            if prop.get("type") in {"select", "multi_select"}:
+                options = prop.get("options", [])
+                if not isinstance(options, list) or any(not isinstance(option, str) or not option for option in options):
+                    errors.append(f"선택 속성 options가 올바르지 않습니다: {prop['name']}")
+                    continue
+            try:
+                api_property(prop)
+            except InstallerError as exc:
+                errors.append(str(exc))
     seed_rows = manifest.get("seed_rows", {})
-    if seed_rows and not isinstance(seed_rows, dict):
+    if not isinstance(seed_rows, dict):
         errors.append("seed_rows는 데이터베이스 key를 가진 객체여야 합니다.")
     if isinstance(seed_rows, dict):
         for key, rows in seed_rows.items():
@@ -115,7 +253,7 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
                 errors.append(f"seed_rows.{key}는 배열이어야 합니다.")
             else:
                 for row in rows:
-                    if not isinstance(row, dict) or not isinstance(row.get("title"), str):
+                    if not isinstance(row, dict) or not isinstance(row.get("title"), str) or not row["title"].strip():
                         errors.append(f"seed_rows.{key}의 각 항목에는 title이 필요합니다.")
     fixed_price_fields = {
         "long_transport": ["항공권 예산"],
@@ -125,7 +263,10 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
         database = next((item for item in databases or [] if isinstance(item, dict) and item.get("key") == database_key), None)
         if not database:
             continue
-        specs = {item.get("name"): item for item in database.get("properties", []) if isinstance(item, dict)}
+        properties = database.get("properties", [])
+        if not isinstance(properties, list):
+            continue
+        specs = {item["name"]: item for item in properties if isinstance(item, dict) and isinstance(item.get("name"), str)}
         for field in fields:
             spec = specs.get(field)
             if not spec or spec.get("unit") != "KRW" or spec.get("format") != "won":
@@ -138,6 +279,18 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
         if any(part in text for part in forbidden) or UUID_RE.search(text):
             errors.append("매니페스트에 Notion URL 또는 객체 ID가 포함되어 있습니다.")
             break
+    if not errors:
+        db_by_key = {database["key"]: database for database in databases}
+        for key, rows in seed_rows.items():
+            titles = set()
+            for row in rows:
+                if row["title"] in titles:
+                    errors.append(f"중복 기본 행: {key}.{row['title']}")
+                titles.add(row["title"])
+                try:
+                    seed_properties(db_by_key[key], row)
+                except InstallerError as exc:
+                    errors.append(str(exc))
     return errors
 
 
@@ -150,7 +303,10 @@ def normalize_id(value: str) -> str:
 
 
 def rich_text(content: str) -> List[Dict[str, Any]]:
-    return [{"type": "text", "text": {"content": content}}]
+    if len(content) > TEXT_LIMIT * BLOCK_BATCH_SIZE:
+        raise InstallerError("텍스트가 Notion 속성 한도를 초과합니다.")
+    return [{"type": "text", "text": {"content": content[offset:offset + TEXT_LIMIT]}}
+            for offset in range(0, len(content), TEXT_LIMIT)]
 
 
 def title_payload(content: str) -> List[Dict[str, Any]]:
@@ -197,25 +353,55 @@ class NotionClient:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
+        read_only = method.upper() == "GET"
+        error_type = InstallerError if read_only else UncertainWriteError
+        for attempt in range(4):
             try:
-                parsed = json.loads(detail)
-                message = parsed.get("message", detail)
-            except json.JSONDecodeError:
-                message = detail
-            raise InstallerError(f"Notion API {exc.code}: {message}") from exc
-        except urllib.error.URLError as exc:
-            raise InstallerError(f"Notion API에 연결하지 못했습니다: {exc.reason}") from exc
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise InstallerError("Notion API 응답이 JSON이 아닙니다.") from exc
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    raw = response.read().decode("utf-8")
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                exc.close()
+                try:
+                    parsed = json.loads(detail)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                extra = parsed.get("additional_data") or {}
+                if not isinstance(extra, dict):
+                    extra = {}
+                blocked = extra.get("rate_limit_reason") == "public_api_request_blocked"
+                retryable = (exc.code in {429, 529} and not blocked) or (
+                    read_only and exc.code in {500, 502, 503, 504}
+                )
+                wait = (exc.headers.get("Retry-After") if exc.headers else None) or extra.get("retry_after")
+                try:
+                    delay = float(wait) if wait is not None else 2 ** attempt
+                except (ValueError, TypeError):
+                    delay = 2 ** attempt
+                if not math.isfinite(delay) or delay < 0:
+                    delay = 2 ** attempt
+                # Do not retry early when the workspace asks for a longer pause.
+                if retryable and attempt < 3 and delay <= 60:
+                    time.sleep(delay + random.uniform(0, 0.25))
+                    continue
+                message = str(parsed.get("message", detail)).replace(self.token, "[redacted]")
+                if not read_only and exc.code >= 500 and exc.code != 529:
+                    raise UncertainWriteError(f"Notion API {exc.code}: {message} (저장 여부 확인 필요)") from exc
+                raise InstallerError(f"Notion API {exc.code}: {message}") from exc
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+                raise error_type("Notion API 연결이 끊겼습니다. 쓰기 작업은 저장 여부를 먼저 확인하세요.") from exc
+            except UnicodeError as exc:
+                raise error_type("Notion API 응답을 UTF-8로 읽지 못했습니다.") from exc
+            try:
+                result = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeError) as exc:
+                raise error_type("Notion API 응답이 JSON이 아닙니다.") from exc
+            if not isinstance(result, dict):
+                raise error_type("Notion API 응답은 객체여야 합니다.")
+            return result
+        raise InstallerError("Notion API 재시도 한도를 초과했습니다.")
 
     def get_page(self, page_id: str) -> Dict[str, Any]:
         return self.request("GET", f"/pages/{page_id}")
@@ -232,7 +418,7 @@ class NotionClient:
     def create_database(self, parent_id: str, title: str, properties: Dict[str, Any], icon: Optional[str] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "parent": {"type": "page_id", "page_id": parent_id},
-            "title": [{"type": "text", "text": {"content": title}}],
+            "title": title_payload(title),
             "properties": properties,
         }
         if icon:
@@ -248,8 +434,9 @@ class NotionClient:
         return self.request("POST", "/pages", payload)
 
     def append_blocks(self, block_id: str, blocks: List[Dict[str, Any]]) -> None:
-        if blocks:
-            self.request("PATCH", f"/blocks/{block_id}/children", {"children": blocks})
+        for offset in range(0, len(blocks), BLOCK_BATCH_SIZE):
+            self.request("PATCH", f"/blocks/{block_id}/children",
+                         {"children": blocks[offset:offset + BLOCK_BATCH_SIZE]})
 
 
 def text_block(text: str, block_type: str = "paragraph") -> Dict[str, Any]:
@@ -301,14 +488,24 @@ def property_value(spec: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]
     if spec.get("computed") or spec.get("type") in {"formula", "rollup", "relation"}:
         return None
     kind = spec.get("type")
+    if value is None:
+        if kind in {"title", "rich_text", "multi_select"}:
+            return {kind: []}
+        if kind == "checkbox":
+            return {kind: False}
+        return {kind: None}
     if kind == "title":
         return {"title": title_payload(str(value))}
     if kind == "rich_text":
         return {"rich_text": rich_text(str(value))}
     if kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise InstallerError(f"{spec['name']}은 유한한 숫자여야 합니다.")
         return {"number": value}
     if kind == "checkbox":
-        return {"checkbox": bool(value)}
+        if not isinstance(value, bool):
+            raise InstallerError(f"{spec['name']}은 true 또는 false여야 합니다.")
+        return {"checkbox": value}
     if kind == "url":
         return {"url": str(value)}
     if kind == "select":
@@ -328,7 +525,10 @@ def seed_properties(database: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, 
     properties: Dict[str, Any] = {
         database["title_property"]: {"title": title_payload(row["title"])}
     }
-    for name, value in row.get("values", {}).items():
+    values = row.get("values", {})
+    if not isinstance(values, dict):
+        raise InstallerError(f"{database['key']} seed 행의 values는 객체여야 합니다.")
+    for name, value in values.items():
         spec = specs.get(name)
         if not spec:
             raise InstallerError(f"{database['key']} seed 행의 속성을 찾을 수 없습니다: {name}")
@@ -350,12 +550,15 @@ def seed_default_rows(manifest: Dict[str, Any], client: NotionClient, mapping: D
         if key not in mapping.get("databases", {}):
             continue
         existing = seeded.setdefault(key, [])
+        existing_titles = {item["title"] for item in existing}
         for row in rows:
-            if row.get("title") in {item.get("title") for item in existing}:
+            if row["title"] in existing_titles:
                 continue
-            created = client.create_database_page(mapping["databases"][key], seed_properties(db_by_key[key], row))
-            existing.append({"title": row["title"], "id": created["id"]})
-            write_json(mapping_path, mapping)
+            properties = seed_properties(db_by_key[key], row)
+            recorded_write(mapping, mapping_path, f"seed:{key}:{row['title']}",
+                           lambda: client.create_database_page(mapping["databases"][key], properties),
+                           lambda created: existing.append({"title": row["title"], "id": created["id"]}))
+            existing_titles.add(row["title"])
 
 
 def database_by_key(manifest: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -369,6 +572,8 @@ def parse_date(value: Optional[str], label: str) -> Optional[dt.date]:
     if not value:
         return None
     try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError(value)
         return dt.date.fromisoformat(value)
     except ValueError as exc:
         raise InstallerError(f"{label}은 YYYY-MM-DD 형식이어야 합니다: {value}") from exc
@@ -387,41 +592,63 @@ def scaffold_trip(
     trip_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     mapping = read_json(mapping_path)
+    check_pending(mapping)
+    check_manifest_version(mapping, manifest)
+    if mapping.get("template_key") != manifest.get("template_key"):
+        raise InstallerError("설치 기록과 매니페스트의 template_key가 다릅니다.")
     if mapping.get("status") != "complete":
         raise InstallerError("먼저 install을 완료해 .souvenir-install.json에 대상 DB 매핑을 만들어야 합니다.")
     for key in ("trip", "itinerary", "traveler", "wallet", "task", "packing"):
         if key not in mapping.get("databases", {}):
             raise InstallerError(f"설치 기록에 {key} 데이터베이스 매핑이 없습니다.")
 
+    destination = destination.strip()
+    if not destination:
+        raise InstallerError("여행 목적지를 입력하세요.")
+
     start = parse_date(start_date, "출발일")
     end = parse_date(end_date, "종료일")
     if start and end and end < start:
         raise InstallerError("종료일은 출발일보다 빠를 수 없습니다.")
     derived_days = (end - start).days + 1 if start and end else None
-    if duration_days is not None and duration_days < 1:
+    if duration_days is not None and (type(duration_days) is not int or duration_days < 1):
         raise InstallerError("기간(일)은 1 이상의 정수여야 합니다.")
     if derived_days and duration_days and derived_days != duration_days:
         raise InstallerError("출발일·종료일과 기간(일)이 서로 다릅니다. 하나의 기준으로 다시 입력하세요.")
     days = derived_days or duration_days
     if not days:
         raise InstallerError("출발일·종료일 또는 기간(일) 중 하나가 필요합니다.")
-    if traveler_count < 0:
+    if type(traveler_count) is not int or traveler_count < 0:
         raise InstallerError("여행 인원은 0 이상이어야 합니다.")
     allowed_currency = {"KRW", "JPY", "USD", "EUR", "미정"}
     if currency not in allowed_currency:
         raise InstallerError("기준 통화는 KRW·JPY·USD·EUR·미정 중 하나여야 합니다.")
 
-    fingerprint = "|".join([
-        destination.strip(), start_date or "", end_date or "", str(days), str(traveler_count), currency,
-    ])
+    try:
+        if start and not end:
+            end = start + dt.timedelta(days=days - 1)
+        elif end and not start:
+            start = end - dt.timedelta(days=days - 1)
+    except OverflowError as exc:
+        raise InstallerError("여행 기간이 지원하는 날짜 범위를 넘었습니다.") from exc
+
+    trip_title = (trip_name or f"✈️ {destination} 여행").strip()
+    fingerprint = json.dumps([destination, start.isoformat() if start else None,
+                              end.isoformat() if end else None, days, traveler_count,
+                              currency, trip_title], ensure_ascii=False)
     scaffolded = mapping.setdefault("scaffolded_trips", {})
-    if fingerprint in scaffolded:
+    legacy_key = "|".join([destination, start_date or "", end_date or "",
+                           str(days), str(traveler_count), currency])
+    legacy = scaffolded.get(legacy_key)
+    if legacy and legacy.get("trip_name") == trip_title and "status" not in legacy:
+        return legacy
+    if fingerprint in scaffolded and scaffolded[fingerprint].get("status") == "complete":
         return scaffolded[fingerprint]
 
-    trip_db = database_by_key(manifest, "trip")
-    trip_title = trip_name or f"✈️ {destination.strip()} 여행"
+    databases = {key: database_by_key(manifest, key)
+                 for key in ("trip", "itinerary", "traveler", "wallet", "task", "packing")}
     trip_values: Dict[str, Any] = {
-        "목적지": destination.strip(),
+        "목적지": destination,
         "여행 상태": "계획 중",
         "인원": traveler_count if traveler_count else None,
         "인원 기준": "직접 입력" if traveler_count else None,
@@ -438,12 +665,11 @@ def scaffold_trip(
         "title": trip_title,
         "values": {key: value for key, value in trip_values.items() if value is not None},
     }
-    trip_page = client.create_database_page(mapping["databases"]["trip"], seed_properties(trip_db, trip_row))
-    trip_id = trip_page["id"]
-    result: Dict[str, Any] = {
-        "trip_id": trip_id,
+    result: Dict[str, Any] = scaffolded.setdefault(fingerprint, {
+        "status": "in_progress",
+        "trip_id": None,
         "trip_name": trip_title,
-        "destination": destination.strip(),
+        "destination": destination,
         "days": days,
         "traveler_count": traveler_count,
         "currency": currency,
@@ -452,45 +678,67 @@ def scaffold_trip(
         "wallet": None,
         "tasks": [],
         "packing": [],
-    }
+    })
+    trip_properties = seed_properties(databases["trip"], trip_row)
+    # Encode every row before creating anything, so a schema error cannot leave
+    # a partially-created trip. The real trip ID is substituted after creation.
+    trip_id = result["trip_id"] or "pending-trip-id"
+    rows: List[tuple[str, str, Dict[str, Any]]] = []
 
-    itinerary_db = database_by_key(manifest, "itinerary")
     for day in range(1, days + 1):
         values: Dict[str, Any] = {"여행 키": trip_id, "일차": day, "상태": "계획"}
         if start:
             values["날짜"] = (start + dt.timedelta(days=day - 1)).isoformat()
         row = {"title": f"{day}일차 계획", "values": values}
-        created = client.create_database_page(mapping["databases"]["itinerary"], seed_properties(itinerary_db, row))
-        result["itinerary"].append(created["id"])
+        rows.append(("itinerary", "itinerary", row))
 
-    traveler_db = database_by_key(manifest, "traveler")
     for index in range(1, traveler_count + 1):
         row = {
             "title": f"동행자 {index}",
             "values": {"여행 키": trip_id, "역할": "여행자", "상태": "참여"},
         }
-        created = client.create_database_page(mapping["databases"]["traveler"], seed_properties(traveler_db, row))
-        result["travelers"].append(created["id"])
+        rows.append(("traveler", "travelers", row))
 
-    wallet_db = database_by_key(manifest, "wallet")
     wallet_row = {
-        "title": f"{destination.strip()} 여행 지갑",
+        "title": f"{destination} 여행 지갑",
         "values": {"여행 키": trip_id, "통화": currency, "금액 입력 완료": False},
     }
-    wallet_page = client.create_database_page(mapping["databases"]["wallet"], seed_properties(wallet_db, wallet_row))
-    result["wallet"] = wallet_page["id"]
+    rows.append(("wallet", "wallet", wallet_row))
 
     for key in ("task", "packing"):
-        database = database_by_key(manifest, key)
         for starter in manifest.get("seed_rows", {}).get(key, []):
             values = dict(starter.get("values", {}))
             values["여행 키"] = trip_id
             values["원본 구분"] = "사용 중"
             row = {"title": starter["title"], "values": values}
-            created = client.create_database_page(mapping["databases"][key], seed_properties(database, row))
-            result["tasks" if key == "task" else "packing"].append(created["id"])
+            rows.append((key, "tasks" if key == "task" else "packing", row))
 
-    scaffolded[fingerprint] = result
+    for key, _, row in rows:
+        seed_properties(databases[key], row)
+    if not result["trip_id"]:
+        recorded_write(mapping, mapping_path, "scaffold:trip",
+                       lambda: client.create_database_page(mapping["databases"]["trip"], trip_properties),
+                       lambda created: result.update(trip_id=created["id"]))
+    completed = {field: len(result[field]) for field in ("itinerary", "travelers", "tasks", "packing")}
+    seen: Dict[str, int] = {}
+    for key, field, row in rows:
+        index = seen.get(field, 0)
+        seen[field] = index + 1
+        if (field == "wallet" and result[field]) or index < completed.get(field, 0):
+            continue
+        row["values"]["여행 키"] = result["trip_id"]
+        properties = seed_properties(databases[key], row)
+
+        def record(created: Dict[str, Any]) -> None:
+            if field == "wallet":
+                result[field] = created["id"]
+            else:
+                result[field].append(created["id"])
+
+        recorded_write(mapping, mapping_path, f"scaffold:{field}:{index}",
+                       lambda: client.create_database_page(mapping["databases"][key], properties), record)
+
+    result["status"] = "complete"
     write_json(mapping_path, mapping)
     return result
 
@@ -506,7 +754,9 @@ def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
                 "key": database["key"],
                 "title": database["title"],
                 "parent": database["parent"],
-                "properties": len(database.get("properties", [])) + 1,
+                "properties": len(database_properties(database)),
+                "deferred_properties": [prop["name"] for prop in database.get("properties", [])
+                                        if api_property(prop) is None],
                 "views": database.get("views", []),
             }
             for database in databases
@@ -522,22 +772,31 @@ def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapping_path: Path) -> Dict[str, Any]:
+    errors = validate_manifest(manifest)
+    if errors:
+        raise InstallerError("매니페스트 검증 실패:\n- " + "\n- ".join(errors))
+    parent_id = normalize_id(parent_id)
     mapping: Dict[str, Any] = {}
     if mapping_path.exists():
-        previous = read_json(mapping_path)
-        if previous.get("template_key") == manifest.get("template_key"):
-            mapping = previous
+        mapping = read_json(mapping_path)
+        if mapping.get("template_key") != manifest.get("template_key"):
+            raise InstallerError("기존 설치 기록은 다른 템플릿입니다. 새 --mapping 경로를 지정하세요.")
+        if normalize_id(mapping.get("parent_page_id", "")) != parent_id:
+            raise InstallerError("기존 설치 기록의 상위 페이지가 다릅니다. 대상별로 다른 --mapping 경로를 사용하세요.")
+    check_pending(mapping)
+    check_manifest_version(mapping, manifest)
     content_rendered = bool(mapping.get("content_rendered"))
     log_rendered = bool(mapping.get("log_rendered"))
     mapping.setdefault("template_key", manifest.get("template_key"))
     mapping.setdefault("template_source", "code_rebuild")
-    mapping.setdefault("status", "in_progress")
+    mapping["status"] = "in_progress"
     mapping.setdefault("pages", {})
     mapping.setdefault("databases", {})
     mapping["parent_page_id"] = parent_id
     mapping["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     client.get_page(parent_id)
+    write_json(mapping_path, mapping)
 
     page_by_key = {page["key"]: page for page in manifest["pages"]}
 
@@ -546,30 +805,39 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
             return mapping["pages"][key]
         page = page_by_key[key]
         parent = parent_id if page["parent"] == "target" else ensure_page(page["parent"])
-        created = client.create_page(parent, page["title"], page.get("icon"))
-        object_id = created["id"]
-        mapping["pages"][key] = object_id
-        write_json(mapping_path, mapping)
-        return object_id
+        recorded_write(mapping, mapping_path, f"page:{key}",
+                       lambda: client.create_page(parent, page["title"], page.get("icon")),
+                       lambda created: mapping["pages"].update({key: created["id"]}))
+        return mapping["pages"][key]
 
     for page in manifest["pages"]:
         ensure_page(page["key"])
 
-    db_by_key = {database["key"]: database for database in manifest["databases"]}
     for database in manifest["databases"]:
         key = database["key"]
+        mapping.setdefault("computed_properties", {})[key] = [
+            prop["name"] for prop in database.get("properties", []) if api_property(prop) is None
+        ]
+        mapping.setdefault("views", {})[key] = database.get("views", [])
         if key in mapping["databases"]:
             continue
         parent = ensure_page(database["parent"])
-        created = client.create_database(parent, database["title"], database_properties(database), database.get("title", "")[0])
-        mapping["databases"][key] = created["id"]
-        mapping.setdefault("computed_properties", {})[key] = [
-            prop["name"] for prop in database.get("properties", []) if prop.get("computed")
-        ]
-        mapping.setdefault("views", {})[key] = database.get("views", [])
-        write_json(mapping_path, mapping)
+        properties = database_properties(database)
+        recorded_write(mapping, mapping_path, f"database:{key}",
+                       lambda: client.create_database(parent, database["title"], properties, database.get("icon")),
+                       lambda created: mapping["databases"].update({key: created["id"]}))
 
     seed_default_rows(manifest, client, mapping, mapping_path)
+
+    def render(key: str, blocks: List[Dict[str, Any]]) -> None:
+        progress = mapping.setdefault("rendered_blocks", {})
+        offset = progress.get(key, 0)
+        while offset < len(blocks):
+            batch = blocks[offset:offset + BLOCK_BATCH_SIZE]
+            recorded_write(mapping, mapping_path, f"content:{key}:{offset}",
+                           lambda: client.append_blocks(mapping["pages"][key], batch),
+                           lambda _: progress.update({key: offset + len(batch)}))
+            offset += len(batch)
 
     if not content_rendered:
         dashboard_blocks: List[Dict[str, Any]] = []
@@ -586,7 +854,7 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
                         dashboard_blocks.append(link_block(mapping["pages"][target], "page_id"))
                     elif target in mapping["databases"]:
                         dashboard_blocks.append(link_block(mapping["databases"][target], "database_id"))
-        client.append_blocks(mapping["pages"]["dashboard"], dashboard_blocks)
+        render("dashboard", dashboard_blocks)
 
         database_titles = {database["key"]: database["title"] for database in manifest["databases"]}
         for page in manifest["pages"]:
@@ -595,13 +863,13 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
                 blocks: List[Dict[str, Any]] = [callout_block(page["title"], "입력 항목은 먼저 작성하고, 자동 결과·보조 속성은 상세 화면에서 확인하세요.", page.get("icon", "🗂️"), page.get("color", "gray_background"))]
                 for key in page.get("database_keys", []):
                     blocks.append(link_block(mapping["databases"][key], "database_id"))
-                client.append_blocks(mapping["pages"][page["key"]], blocks)
+                render(page["key"], blocks)
             elif role == "planning_zone":
                 blocks = [callout_block(page["title"], "출발 전 작성·수정 공간입니다. 여행 중에는 확인 존을 먼저 보고, 계획을 바꿀 때만 이곳으로 들어오세요.", page.get("icon", "🛠️"), page.get("color", "blue_background"))]
                 for child in page.get("children", []):
                     if child in mapping["pages"]:
                         blocks.append(link_block(mapping["pages"][child], "page_id"))
-                client.append_blocks(mapping["pages"][page["key"]], blocks)
+                render(page["key"], blocks)
             elif role == "travel_mode":
                 blocks = [callout_block(page["title"], "여행 중 확인용 화면입니다. 계획을 수정하지 않을 때는 이 페이지를 잠가 두고 오늘 일정·예약·숙소·지갑만 확인하세요.", page.get("icon", "🧭"), page.get("color", "green_background"))]
                 cards = page.get("cards", [])
@@ -618,13 +886,14 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
                         visible = page.get("visible_properties", {}).get(key, [])
                         if visible:
                             blocks.append(text_block("확인 표시: " + " · ".join(visible), "paragraph"))
-                client.append_blocks(mapping["pages"][page["key"]], blocks)
+                render(page["key"], blocks)
         mapping["content_rendered"] = True
+        write_json(mapping_path, mapping)
 
     log_id = mapping["pages"].get("install_log")
     if log_id and not log_rendered:
         summary = json.dumps({"status": "완료", "template_source": "code_rebuild", "pages": mapping["pages"], "databases": mapping["databases"]}, ensure_ascii=False)
-        client.append_blocks(log_id, [heading_block("설치 기록", 2), text_block("Souvenir 코드 설치가 완료되었습니다."), text_block(summary)])
+        render("install_log", [heading_block("설치 기록", 2), text_block("Souvenir 코드 설치가 완료되었습니다."), text_block(summary)])
         mapping["log_rendered"] = True
 
     mapping["status"] = "complete"
