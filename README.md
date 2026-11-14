@@ -265,7 +265,7 @@ python3 skills/souvenir/scripts/notion_installer.py scaffold \
 
 ## 업데이트하기
 
-동시 작업 보호 계획과 P0·P1·P2 구현 범위는 [동시성 대응 메모](docs/concurrency-roadmap.md)에 정리해요.
+동시 작업 보호 계획과 P0·P1·P2 구현 범위는 [동시성 대응 메모](docs/concurrency-roadmap.md)에 정리해요. 여러 컴퓨터에서 강한 단일 writer가 필요하면 선택형 [P2 coordinator](docs/coordinator.md)를 한 대의 서버에서 실행하고 `SOUVENIR_COORDINATOR_URL`·`SOUVENIR_COORDINATOR_TOKEN`을 각 환경에 설정해요. URL을 설정했는데 coordinator에 연결되지 않으면 안전을 위해 Notion 쓰기를 시작하지 않아요.
 
 Git clone으로 설치했다면 저장소 폴더에서 실행해요.
 

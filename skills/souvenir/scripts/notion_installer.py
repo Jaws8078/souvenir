@@ -37,6 +37,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+try:
+    from coordinator import CoordinatorClient, CoordinatorError
+except ModuleNotFoundError:  # The installer is also loaded directly by offline tests.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from coordinator import CoordinatorClient, CoordinatorError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "assets" / "template-manifest.json"
@@ -51,6 +57,36 @@ LEASE_COMPLETED = "완료"
 LEASE_CONFLICT = "충돌"
 LEASE_REVIEW = "확인 필요"
 LEASE_DEFAULT_MINUTES = 10
+
+
+def _coordinator_client() -> Optional[CoordinatorClient]:
+    endpoint = os.environ.get("SOUVENIR_COORDINATOR_URL", "").strip()
+    if not endpoint:
+        return None
+    return CoordinatorClient(endpoint, os.environ.get("SOUVENIR_COORDINATOR_TOKEN"))
+
+
+@contextmanager
+def distributed_lease(workspace_key: str, trip_key: str, operation_type: str,
+                      owner: str, target: str = "", request_key: Optional[str] = None) -> Any:
+    """Use P2 coordination when configured; fail closed if it is unavailable."""
+    client = _coordinator_client()
+    if client is None:
+        yield None
+        return
+    try:
+        with client.lease(
+            workspace_key=workspace_key,
+            trip_key=trip_key,
+            operation_type=operation_type,
+            owner=owner,
+            target=target,
+            lease_seconds=int(os.environ.get("SOUVENIR_COORDINATOR_LEASE_SECONDS", "600")),
+            request_key=request_key or os.environ.get("SOUVENIR_OPERATION_ID") or uuid.uuid4().hex,
+        ) as lease:
+            yield lease
+    except CoordinatorError as exc:
+        raise InstallerError(f"중앙 Souvenir coordinator 작업을 시작하지 못했습니다: {exc}") from exc
 
 
 def configure_output() -> None:
@@ -1405,19 +1441,20 @@ def scaffold_trip(
             traveler_count, currency, trip_name,
         )
         owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
-        with operation_lease(mapping, mapping_path, client, trip_key, "scaffold", owner, destination):
-            return _scaffold_trip_unlocked(
-                manifest,
-                client,
-                mapping_path,
-                destination,
-                start_date,
-                end_date,
-                duration_days,
-                traveler_count,
-                currency,
-                trip_name,
-            )
+        with distributed_lease(workspace_key, trip_key, "scaffold", owner, destination):
+            with operation_lease(mapping, mapping_path, client, trip_key, "scaffold", owner, destination):
+                return _scaffold_trip_unlocked(
+                    manifest,
+                    client,
+                    mapping_path,
+                    destination,
+                    start_date,
+                    end_date,
+                    duration_days,
+                    traveler_count,
+                    currency,
+                    trip_name,
+                )
 
 
 def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -1590,7 +1627,15 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
     """Install/reuse a template while holding both local write locks."""
     normalized_parent = normalize_id(parent_id)
     with operation_locks(mapping_path, normalized_parent, "install"):
-        return _install_unlocked(manifest, client, normalized_parent, mapping_path)
+        owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
+        with distributed_lease(
+            normalized_parent,
+            "install:" + normalized_parent,
+            "install",
+            owner,
+            normalized_parent,
+        ):
+            return _install_unlocked(manifest, client, normalized_parent, mapping_path)
 
 
 def build_parser() -> argparse.ArgumentParser:

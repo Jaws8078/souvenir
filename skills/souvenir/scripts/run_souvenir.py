@@ -9,6 +9,7 @@ continue to live in ``trip_engine.py``.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import sys
 from pathlib import Path
@@ -32,6 +33,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "engine": "souvenir-trip-engine",
                     "entrypoint": str(Path(__file__).resolve()),
                     "python": platform.python_version(),
+                    "coordinator": {
+                        "configured": bool(os.environ.get("SOUVENIR_COORDINATOR_URL")),
+                        "endpoint": os.environ.get("SOUVENIR_COORDINATOR_URL") or None,
+                    },
                 },
                 ensure_ascii=False,
             )

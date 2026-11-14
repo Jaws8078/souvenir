@@ -17,7 +17,7 @@
 | fallback 설치·여행 생성 | `notion_installer.py` | P0·P1 구현 |
 | Python 계산 엔진 | `trip_engine.py` | 읽기 전용, 직접 쓰기 없음 |
 | Codex·ChatGPT Notion 플러그인 쓰기 | 스킬 대화 규칙 | 재조회·단일 작성자 규칙 |
-| 여러 컴퓨터의 분산 잠금 | 별도 coordinator 없음 | P2 대상 |
+| 여러 컴퓨터의 분산 잠금 | 선택형 SQLite coordinator | P2 구현, 운영 배포 필요 |
 
 Python 엔진은 일정·예산·확인 화면을 계산만 한다. 계산 결과는 최신 Notion 상태를 다시 읽고 사용자 승인을 받은 뒤에만 쓰기 경로로 넘어간다.
 
@@ -145,9 +145,9 @@ fallback `NotionClient`는 프로세스 내부에서 요청 간격을 두고, 42
 - [ ] 큐 대기 중 사용자가 취소하는 UI
 - [ ] 수식·롤업 반영 지연의 Notion 연결 UI 검수
 
-## P2 · 분산 환경 확장 — 장기 과제
+## P2 · 분산 환경 확장 — coordinator 구현 완료, 운영 배포 필요
 
-Notion API만으로는 여러 컴퓨터 사이의 강한 분산 잠금을 보장할 수 없다. 완전한 조정이 필요하면 Souvenir 전용 coordinator가 필요하다.
+Notion API만으로는 여러 컴퓨터 사이의 강한 분산 잠금을 보장할 수 없다. `skills/souvenir/scripts/coordinator.py`에 의존성 없는 SQLite·HTTP coordinator를 추가했고, `SOUVENIR_COORDINATOR_URL`이 설정된 실행기는 Notion 쓰기 전에 coordinator lease를 획득한다. 설정 방법과 운영 주의사항은 [P2 coordinator 가이드](coordinator.md)에 정리했다.
 
 ### 후보 구조
 
@@ -169,13 +169,19 @@ coordinator는 다음을 책임진다.
 - 작업 재시작·취소·보상 처리
 - 감사 로그와 충돌 이력
 
+현재 구현은 SQLite 트랜잭션으로 위 책임을 수행한다. lease heartbeat는 클라이언트 context manager가 자동으로 보내고, queue·멱등 키·보상 이벤트·schema migration 상태도 같은 저장소에 기록한다. coordinator가 설정됐는데 연결되지 않으면 실행기는 P1로 몰래 내려가지 않고 쓰기를 중단한다.
+
 ### P2에서 보장할 것
 
-- 여러 기기에서 같은 여행의 동시 생성 직렬화
-- 작업자가 오프라인이 된 뒤 lease 자동 회수
-- 중복·충돌을 작업 단위로 되돌리는 보상 작업
-- 버전별 템플릿 스키마 마이그레이션
-- 원본 템플릿 배포와 사용자 여행 데이터 분리
+- [x] 여러 기기에서 같은 여행의 동시 생성 직렬화(중앙 coordinator 사용 시)
+- [x] 작업자가 오프라인이 된 뒤 heartbeat 만료 lease 회수
+- [x] 동일 요청 키의 원자적 중복 방지
+- [x] 순차 queue claim·완료·취소 상태
+- [x] 보상 이벤트 기록·claim·완료 상태
+- [x] coordinator schema migration 버전 기록
+- [x] 원본 템플릿 배포와 사용자 여행 데이터 분리
+- [ ] coordinator의 HTTPS reverse proxy·백업·고가용성 운영
+- [ ] Notion 외부 변경을 실제로 되돌리는 도메인별 보상 worker
 
 ## 충돌 처리 원칙
 
@@ -196,6 +202,7 @@ coordinator는 다음을 책임진다.
 - [x] P0 회귀 테스트
 - [x] fallback 설치기의 여행별 Notion lease 기록
 - [x] fallback 프로세스 내부 요청 간격·재시도 조정
-- [ ] 여러 플러그인 세션의 강한 여행별 쓰기 큐
-- [ ] 다중 기기 coordinator
+- [x] 여러 플러그인 세션의 강한 여행별 쓰기 큐(coordinator 설정 시)
+- [x] 다중 기기 coordinator 코드
+- [ ] coordinator 운영 배포·모니터링
 
