@@ -24,11 +24,19 @@ class FakeNotion:
         self.created = []
         self.blocks = []
         self.fail_at = None
+        self.fail_on_append_after = None
+        self.append_calls = 0
+        self.fail_on_database_id = None
+        self.fail_on_database_page_after = None
+        self.database_page_calls = {}
         self.error = ni.InstallerError("definite rejection")
         self.calls = 0
 
     def get_page(self, page_id):
-        return {"id": page_id}
+        for _kind, _parent, properties, row_id in self.created:
+            if row_id == page_id:
+                return {"id": row_id, "properties": copy.deepcopy(properties), "last_edited_time": "v1"}
+        return {"id": page_id, "last_edited_time": "v1"}
 
     def get_database(self, database_id):
         for kind, _parent, properties, row_id in self.created:
@@ -58,26 +66,56 @@ class FakeNotion:
         return self.create("database", parent, properties)
 
     def create_database_page(self, parent, properties):
+        count = self.database_page_calls.get(parent, 0) + 1
+        self.database_page_calls[parent] = count
+        if (parent == self.fail_on_database_id and
+                self.fail_on_database_page_after is not None and
+                count == self.fail_on_database_page_after):
+            raise self.error
         return self.create("row", parent, properties)
 
     def query_database(self, database_id, payload=None):
         payload = payload or {}
         filter_value = payload.get("filter", {})
-        key = filter_value.get("rich_text", {}).get("equals")
-        if filter_value.get("property") != ni.IDEMPOTENCY_PROPERTY or key is None:
-            return []
-        matches = []
+
+        def read_text(properties, name):
+            values = properties.get(name, {}).get("title") or properties.get(name, {}).get("rich_text") or []
+            return "".join(item.get("text", {}).get("content", "") for item in values)
+
+        def matches_filter(properties, current):
+            if "and" in current:
+                return all(matches_filter(properties, child) for child in current["and"])
+            name = current.get("property")
+            if "rich_text" in current:
+                return read_text(properties, name) == current["rich_text"].get("equals")
+            if "select" in current:
+                return properties.get(name, {}).get("select", {}).get("name") == current["select"].get("equals")
+            return False
+
+        results = []
         for kind, parent, properties, row_id in self.created:
             if kind != "row" or parent != database_id:
                 continue
-            rich_text = properties.get(ni.IDEMPOTENCY_PROPERTY, {}).get("rich_text", [])
-            value = "".join(item.get("text", {}).get("content", "") for item in rich_text)
-            if value == key:
-                matches.append({"id": row_id})
-        return matches
+            if matches_filter(properties, filter_value):
+                results.append({"id": row_id, "properties": copy.deepcopy(properties)})
+        return results
+
+    def update_page_properties(self, page_id, properties, expected_last_edited_time=None):
+        for index, (kind, parent, current, row_id) in enumerate(self.created):
+            if row_id != page_id:
+                continue
+            if expected_last_edited_time is not None and expected_last_edited_time != "v1":
+                raise ni.ConflictError("stale")
+            current.update(copy.deepcopy(properties))
+            self.created[index] = (kind, parent, current, row_id)
+            return {"id": row_id, "properties": copy.deepcopy(current), "last_edited_time": "v1"}
+        return {"id": page_id, "properties": copy.deepcopy(properties), "last_edited_time": "v1"}
 
     def append_blocks(self, page_id, blocks):
         self.calls += 1
+        self.append_calls += 1
+        if self.append_calls == self.fail_on_append_after:
+            raise self.error
         if self.calls == self.fail_at:
             raise self.error
         self.blocks.append((page_id, copy.deepcopy(blocks)))
@@ -99,6 +137,13 @@ class InstallerTests(unittest.TestCase):
                        duration_days=None, traveler_count=4, currency="JPY")
         options.update(kwargs)
         return ni.scaffold_trip(self.manifest, self.client, self.path, **options)
+
+    def core_row_ids(self):
+        mapping = ni.read_json(self.path)
+        database_ids = {mapping["databases"][key] for key in
+                        ("trip", "itinerary", "traveler", "wallet", "task", "packing")}
+        return {row_id for kind, parent, _payload, row_id in self.client.created
+                if kind == "row" and parent in database_ids}
 
     def test_manifest_and_repeat_install(self):
         self.assertEqual(ni.validate_manifest(self.manifest), [])
@@ -144,15 +189,15 @@ class InstallerTests(unittest.TestCase):
             self.install()
 
     def test_install_resumes_each_content_page_without_duplicates(self):
-        # Eight pages + twenty DBs + twenty-three seed rows, then page content.
-        self.client.fail_at = 54
+        # Let multiple page bodies persist, then fail on a later content batch.
+        self.client.fail_on_append_after = 3
         with self.assertRaises(ni.InstallerError):
             self.install()
         created_count = len(self.client.created)
         first_blocks = copy.deepcopy(self.client.blocks)
         self.assertGreater(len(first_blocks), 0)
         self.assertNotIn("pending_operation", ni.read_json(self.path))
-        self.client.fail_at = None
+        self.client.fail_on_append_after = None
         self.install()
         self.assertEqual(len(self.client.created), created_count)
         self.assertEqual(self.client.blocks[:len(first_blocks)], first_blocks)
@@ -167,19 +212,22 @@ class InstallerTests(unittest.TestCase):
         dates = [payload["날짜"]["date"]["start"] for kind, _, payload, row_id in self.client.created
                  if row_id in result["itinerary"]]
         self.assertEqual(dates, ["2026-12-12", "2026-12-13", "2026-12-14", "2026-12-15"])
-        calls = self.client.calls
+        core_rows = self.core_row_ids()
         self.assertEqual(self.scaffold(), result)
-        self.assertEqual(self.client.calls, calls)
+        self.assertEqual(self.core_row_ids(), core_rows)
 
     def test_scaffold_resumes_partial_trip(self):
         self.install()
-        self.client.fail_at = self.client.calls + 4
+        itinerary_db = ni.read_json(self.path)["databases"]["itinerary"]
+        self.client.fail_on_database_id = itinerary_db
+        self.client.fail_on_database_page_after = 3
         with self.assertRaises(ni.InstallerError):
             self.scaffold()
         partial = next(iter(ni.read_json(self.path)["scaffolded_trips"].values()))
         self.assertEqual(partial["status"], "in_progress")
         self.assertEqual(len(partial["itinerary"]), 2)
-        self.client.fail_at = None
+        self.client.fail_on_database_id = None
+        self.client.fail_on_database_page_after = None
         result = self.scaffold()
         self.assertEqual(result["trip_id"], partial["trip_id"])
         self.assertEqual(result["itinerary"][:2], partial["itinerary"])
@@ -190,7 +238,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_uncertain_write_stops_automatic_replay(self):
         self.install()
-        self.client.fail_at = self.client.calls + 2
+        itinerary_db = ni.read_json(self.path)["databases"]["itinerary"]
+        self.client.fail_on_database_id = itinerary_db
+        self.client.fail_on_database_page_after = 1
         self.client.error = ni.UncertainWriteError("timeout after saving")
         with self.assertRaises(ni.UncertainWriteError):
             self.scaffold()
@@ -202,7 +252,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_pending_operation_contains_owner_and_idempotency_key(self):
         self.install()
-        self.client.fail_at = self.client.calls + 1
+        itinerary_db = ni.read_json(self.path)["databases"]["itinerary"]
+        self.client.fail_on_database_id = itinerary_db
+        self.client.fail_on_database_page_after = 1
         self.client.error = ni.UncertainWriteError("timeout after saving")
         with self.assertRaises(ni.UncertainWriteError):
             self.scaffold(traveler_count=0)
@@ -210,6 +262,38 @@ class InstallerTests(unittest.TestCase):
         self.assertIsInstance(pending, dict)
         self.assertTrue(pending["operation_id"])
         self.assertTrue(pending["idempotency_key"])
+
+    def test_active_trip_lease_blocks_second_writer(self):
+        self.install()
+        mapping = ni.read_json(self.path)
+        trip_key = ni.preview_trip_key(
+            self.manifest, "후쿠오카", "2026-12-12", "2026-12-15", None, 4, "JPY"
+        )
+        now = ni.dt.datetime(2026, 12, 1, tzinfo=ni.dt.timezone.utc)
+        lease = ni.claim_operation(mapping, self.path, self.client, trip_key, "수정", "세션 A", "첫날 일정", now=now)
+        with self.assertRaisesRegex(ni.ConflictError, "이미 반영 중"):
+            ni.claim_operation(ni.read_json(self.path), self.path, self.client,
+                               trip_key, "수정", "세션 B", "예산", now=now)
+        ni.release_operation(mapping, self.path, self.client, lease)
+        self.assertFalse(ni._active_lease_rows(
+            self.client.query_database(mapping["operation_log_database_id"]), now
+        ))
+
+    def test_expired_trip_lease_is_audited_and_reacquired(self):
+        self.install()
+        mapping = ni.read_json(self.path)
+        trip_key = ni.preview_trip_key(
+            self.manifest, "후쿠오카", "2026-12-12", "2026-12-15", None, 4, "JPY"
+        )
+        first_now = ni.dt.datetime(2026, 12, 1, tzinfo=ni.dt.timezone.utc)
+        first = ni.claim_operation(mapping, self.path, self.client, trip_key, "수정", "세션 A", now=first_now)
+        later = first_now + ni.dt.timedelta(minutes=11)
+        second = ni.claim_operation(ni.read_json(self.path), self.path, self.client,
+                                    trip_key, "수정", "세션 B", now=later)
+        old = next(properties for kind, _parent, properties, row_id in self.client.created
+                   if row_id == first["page_id"])
+        self.assertEqual(old["상태"]["select"]["name"], ni.LEASE_REVIEW)
+        ni.release_operation(ni.read_json(self.path), self.path, self.client, second)
 
     def test_same_mapping_is_locked_during_write(self):
         with ni.operation_locks(self.path, PARENT, "test"):
@@ -236,7 +320,7 @@ class InstallerTests(unittest.TestCase):
     def test_scaffold_reuses_rows_by_key_from_another_mapping(self):
         self.install()
         first = self.scaffold()
-        original_created = len(self.client.created)
+        original_core_rows = self.core_row_ids()
         second_path = Path(self.tmp.name) / "second.json"
         mapping = ni.read_json(self.path)
         mapping["scaffolded_trips"] = {}
@@ -246,7 +330,7 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(second["trip_id"], first["trip_id"])
         self.assertEqual(second["itinerary"], first["itinerary"])
-        self.assertEqual(len(self.client.created), original_created)
+        self.assertEqual(self.core_row_ids(), original_core_rows)
 
     def test_duration_only_has_no_invented_dates(self):
         self.install()
@@ -261,9 +345,9 @@ class InstallerTests(unittest.TestCase):
         result = self.scaffold(end_date=None, duration_days=4)
         trip = next(payload for _, _, payload, row_id in self.client.created if row_id == result["trip_id"])
         self.assertEqual(trip["종료일"]["date"]["start"], "2026-12-15")
-        calls = self.client.calls
+        core_rows = self.core_row_ids()
         self.assertEqual(self.scaffold(), result)
-        self.assertEqual(self.client.calls, calls)
+        self.assertEqual(self.core_row_ids(), core_rows)
 
     def test_different_trip_names_do_not_collide(self):
         self.install()
@@ -329,9 +413,9 @@ class InstallerTests(unittest.TestCase):
         mapping["scaffolded_trips"] = {"후쿠오카|2026-12-12|2026-12-15|4|4|JPY": legacy}
         mapping.pop("manifest_digest")
         ni.write_json(self.path, mapping)
-        calls = self.client.calls
+        core_rows = self.core_row_ids()
         self.assertEqual(self.scaffold(), legacy)
-        self.assertEqual(calls, self.client.calls)
+        self.assertEqual(self.core_row_ids(), core_rows)
 
     def test_missing_scaffold_property_is_detected_before_trip_created(self):
         self.install()
@@ -340,10 +424,10 @@ class InstallerTests(unittest.TestCase):
         mapping = ni.read_json(self.path)
         mapping.pop("manifest_digest")  # Simulate a legacy installation without a digest.
         ni.write_json(self.path, mapping)
-        calls = self.client.calls
+        core_rows = self.core_row_ids()
         with self.assertRaisesRegex(ni.InstallerError, "일차"):
             self.scaffold()
-        self.assertEqual(calls, self.client.calls)
+        self.assertEqual(self.core_row_ids(), core_rows)
 
     def test_text_chunks_preserve_long_korean_text(self):
         value = "여행 정보🧳" * 500
@@ -387,6 +471,7 @@ class ClientTests(unittest.TestCase):
         cases = [(400, {}, {}), (401, {}, {}), (429, {"Retry-After": "120"}, {}),
                  (429, {}, {"rate_limit_reason": "public_api_request_blocked"})]
         for code, headers, extra in cases:
+            self.client._next_request_at = 0.0
             with self.subTest(code=code, extra=extra), patch.object(ni.urllib.request, "urlopen",
                 side_effect=self.http_error(code, headers, extra)) as request, patch.object(ni.time, "sleep") as sleep:
                 with self.assertRaises(ni.InstallerError):

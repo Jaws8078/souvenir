@@ -28,6 +28,7 @@ import re
 import socket
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +45,12 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a
 BLOCK_BATCH_SIZE = 100
 TEXT_LIMIT = 2000
 IDEMPOTENCY_PROPERTY = "Souvenir 작업 키"
+OPERATION_LOG_TITLE = "Souvenir · 작업 기록"
+LEASE_ACTIVE = "반영 중"
+LEASE_COMPLETED = "완료"
+LEASE_CONFLICT = "충돌"
+LEASE_REVIEW = "확인 필요"
+LEASE_DEFAULT_MINUTES = 10
 
 
 def configure_output() -> None:
@@ -459,6 +466,21 @@ class NotionClient:
     def __init__(self, token: str, api_version: str = "2022-06-28") -> None:
         self.token = token
         self.api_version = api_version
+        self._rate_lock = threading.Lock()
+        self._next_request_at = 0.0
+        self._request_spacing = 0.05
+
+    def _wait_for_rate_slot(self) -> None:
+        with self._rate_lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next_request_at - now)
+            self._next_request_at = max(now, self._next_request_at) + self._request_spacing
+        if delay:
+            time.sleep(delay)
+
+    def _defer_requests(self, delay: float) -> None:
+        with self._rate_lock:
+            self._next_request_at = max(self._next_request_at, time.monotonic() + max(0.0, delay))
 
     def request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -475,6 +497,7 @@ class NotionClient:
         read_only = method.upper() == "GET"
         error_type = InstallerError if read_only else UncertainWriteError
         for attempt in range(4):
+            self._wait_for_rate_slot()
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     raw = response.read().decode("utf-8")
@@ -503,7 +526,7 @@ class NotionClient:
                     delay = 2 ** attempt
                 # Do not retry early when the workspace asks for a longer pause.
                 if retryable and attempt < 3 and delay <= 60:
-                    time.sleep(delay + random.uniform(0, 0.25))
+                    self._defer_requests(delay + random.uniform(0, 0.25))
                     continue
                 message = str(parsed.get("message", detail)).replace(self.token, "[redacted]")
                 if not read_only and exc.code >= 500 and exc.code != 529:
@@ -809,6 +832,274 @@ def _verify_database_property(client: Any, database_id: str) -> None:
         raise UncertainWriteError("Souvenir 작업 키 속성을 저장 후 확인하지 못했습니다.")
 
 
+def operation_database_properties() -> Dict[str, Any]:
+    return {
+        "작업": {"title": {}},
+        "작업 ID": {"rich_text": {}},
+        "여행 키": {"rich_text": {}},
+        "작업 종류": {"rich_text": {}},
+        "작성자": {"rich_text": {}},
+        "상태": {"select": {"options": [
+            {"name": "대기"}, {"name": LEASE_ACTIVE}, {"name": LEASE_COMPLETED},
+            {"name": LEASE_CONFLICT}, {"name": LEASE_REVIEW},
+        ]}},
+        "시작": {"date": {}},
+        "만료": {"date": {}},
+        "대상": {"rich_text": {}},
+        "결과": {"rich_text": {}},
+        IDEMPOTENCY_PROPERTY: {"rich_text": {}},
+    }
+
+
+def ensure_operation_log(mapping: Dict[str, Any], path: Path, client: Any) -> str:
+    """Create or reuse the hidden shared lease database for this installation."""
+    existing = mapping.get("operation_log_database_id")
+    if existing:
+        get_database = getattr(client, "get_database", None)
+        add_property = getattr(client, "add_database_property", None)
+        if callable(get_database) and callable(add_property):
+            current = get_database(existing)
+            properties = current.get("properties", {}) if isinstance(current, dict) else {}
+            if IDEMPOTENCY_PROPERTY not in properties:
+                recorded_write(
+                    mapping,
+                    path,
+                    "schema:operation_log:Souvenir 작업 키",
+                    lambda: add_property(existing, IDEMPOTENCY_PROPERTY),
+                    lambda _: None,
+                    verify=lambda _: _verify_database_property(client, existing),
+                    idempotency_key=stable_key("schema", mapping.get("template_key"), "operation_log"),
+                )
+        return existing
+    install_log = mapping.get("pages", {}).get("install_log")
+    if not install_log:
+        raise InstallerError("작업 기록 DB를 만들 설치 기록 페이지가 없습니다.")
+    recorded_write(
+        mapping,
+        path,
+        "database:operation_log",
+        lambda: client.create_database(install_log, OPERATION_LOG_TITLE, operation_database_properties(), "🧭"),
+        lambda created: mapping.update({"operation_log_database_id": created["id"]}),
+        verify=lambda created: verify_created(client, created),
+        idempotency_key=stable_key("operation-log", mapping.get("template_key"), install_log),
+    )
+    write_json(path, mapping)
+    return mapping["operation_log_database_id"]
+
+
+def _plain_property_text(properties: Dict[str, Any], name: str) -> str:
+    prop = properties.get(name, {}) if isinstance(properties, dict) else {}
+    values = prop.get("title") or prop.get("rich_text") or []
+    if not isinstance(values, list):
+        return ""
+    return "".join(
+        item.get("plain_text") or item.get("text", {}).get("content", "")
+        for item in values if isinstance(item, dict)
+    )
+
+
+def _select_property_name(properties: Dict[str, Any], name: str) -> str:
+    prop = properties.get(name, {}) if isinstance(properties, dict) else {}
+    value = prop.get("select")
+    return value.get("name", "") if isinstance(value, dict) else ""
+
+
+def _date_property_start(properties: Dict[str, Any], name: str) -> Optional[str]:
+    prop = properties.get(name, {}) if isinstance(properties, dict) else {}
+    value = prop.get("date")
+    return value.get("start") if isinstance(value, dict) else None
+
+
+def _utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+def _iso_datetime(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _active_lease_rows(rows: List[Dict[str, Any]], now: dt.datetime) -> List[Dict[str, Any]]:
+    active: List[Dict[str, Any]] = []
+    for row in rows:
+        properties = row.get("properties", {}) if isinstance(row, dict) else {}
+        if _select_property_name(properties, "상태") != LEASE_ACTIVE:
+            continue
+        expiry = _date_property_start(properties, "만료")
+        try:
+            expires_at = dt.datetime.fromisoformat((expiry or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if expires_at > now:
+            active.append(row)
+    return active
+
+
+def _expire_lease_rows(client: Any, rows: List[Dict[str, Any]], now: dt.datetime) -> None:
+    """Mark expired claims for audit before a new claim is created."""
+    for row in rows:
+        properties = row.get("properties", {}) if isinstance(row, dict) else {}
+        if _select_property_name(properties, "상태") != LEASE_ACTIVE:
+            continue
+        expiry = _date_property_start(properties, "만료")
+        try:
+            expires_at = dt.datetime.fromisoformat((expiry or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if expires_at > now:
+            continue
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            continue
+        client.update_page_properties(row_id, {
+            "상태": {"select": {"name": LEASE_REVIEW}},
+            "결과": {"rich_text": rich_text("lease 만료 후 재획득")},
+        })
+
+
+def claim_operation(mapping: Dict[str, Any], path: Path, client: Any, trip_key: str,
+                    operation_type: str, owner: str, target: str = "",
+                    lease_minutes: int = LEASE_DEFAULT_MINUTES,
+                    now: Optional[dt.datetime] = None) -> Dict[str, Any]:
+    """Claim an advisory Notion lease for one trip write batch.
+
+    Notion does not provide compare-and-swap for creating a lease row. We query
+    active rows, create one, then query again. If the verification sees multiple
+    live owners, this claim is marked as a conflict and no trip write proceeds.
+    """
+    if type(lease_minutes) is not int or lease_minutes < 1 or lease_minutes > 1440:
+        raise InstallerError("작업 lease 시간은 1~1440분이어야 합니다.")
+    database_id = mapping.get("operation_log_database_id") or ensure_operation_log(mapping, path, client)
+    current = now or _utc_now()
+    expires = current + dt.timedelta(minutes=lease_minutes)
+    filters = {"and": [
+        {"property": "여행 키", "rich_text": {"equals": trip_key}},
+        {"property": "상태", "select": {"equals": LEASE_ACTIVE}},
+    ]}
+    candidates = client.query_database(database_id, {"filter": filters, "page_size": 20})
+    _expire_lease_rows(client, candidates, current)
+    existing = _active_lease_rows(candidates, current)
+    if existing:
+        other = _plain_property_text(existing[0].get("properties", {}), "작성자") or "다른 세션"
+        raise ConflictError(f"이 여행에 이미 반영 중인 작업이 있습니다: {other}")
+
+    operation_id = uuid.uuid4().hex
+    key = stable_key("lease", trip_key, operation_id)
+    properties = {
+        "작업": {"title": title_payload(f"{operation_type} · {operation_id[:8]}")},
+        "작업 ID": {"rich_text": rich_text(operation_id)},
+        "여행 키": {"rich_text": rich_text(trip_key)},
+        "작업 종류": {"rich_text": rich_text(operation_type)},
+        "작성자": {"rich_text": rich_text(owner)},
+        "상태": {"select": {"name": LEASE_ACTIVE}},
+        "시작": {"date": {"start": _iso_datetime(current)}},
+        "만료": {"date": {"start": _iso_datetime(expires)}},
+        "대상": {"rich_text": rich_text(target)},
+        "결과": {"rich_text": []},
+        IDEMPOTENCY_PROPERTY: {"rich_text": rich_text(key)},
+    }
+    holder: Dict[str, Any] = {}
+    recorded_write(
+        mapping,
+        path,
+        f"lease:claim:{operation_id}",
+        lambda: client.create_database_page(database_id, properties),
+        lambda created: holder.update({"page_id": created["id"]}),
+        verify=lambda created: verify_created(client, created),
+        idempotency_key=key,
+    )
+    mapping.setdefault("active_leases", {})[operation_id] = {
+        "page_id": holder["page_id"],
+        "trip_key": trip_key,
+        "expires_at": _iso_datetime(expires),
+        "owner": owner,
+    }
+    write_json(path, mapping)
+
+    confirmed = _active_lease_rows(client.query_database(database_id, {"filter": filters, "page_size": 20}), current)
+    if len(confirmed) != 1 or confirmed[0].get("id") != holder["page_id"]:
+        try:
+            client.update_page_properties(holder["page_id"], {
+                "상태": {"select": {"name": LEASE_CONFLICT}},
+                "결과": {"rich_text": rich_text("동시 claim 충돌")},
+            })
+        finally:
+            mapping.get("active_leases", {}).pop(operation_id, None)
+            write_json(path, mapping)
+        raise ConflictError("동시에 작업 lease를 획득한 세션이 있어 반영을 중단했습니다.")
+    return {
+        "operation_id": operation_id,
+        "page_id": holder["page_id"],
+        "trip_key": trip_key,
+        "expires_at": _iso_datetime(expires),
+        "owner": owner,
+    }
+
+
+def release_operation(mapping: Dict[str, Any], path: Path, client: Any, lease: Dict[str, Any],
+                      status: str = LEASE_COMPLETED, result: str = "") -> None:
+    if status not in {LEASE_COMPLETED, LEASE_CONFLICT, LEASE_REVIEW}:
+        raise InstallerError(f"지원하지 않는 작업 lease 종료 상태입니다: {status}")
+    # The protected operation may have reloaded and checkpointed a newer
+    # mapping while the context manager still holds its original dictionary.
+    # Always merge the release into the latest on-disk checkpoint so the lease
+    # update cannot erase scaffold/install progress.
+    latest = read_json(path)
+    client.update_page_properties(lease["page_id"], {
+        "상태": {"select": {"name": status}},
+        "결과": {"rich_text": rich_text(result)},
+    })
+    latest.setdefault("active_leases", {}).pop(lease.get("operation_id"), None)
+    write_json(path, latest)
+    mapping.clear()
+    mapping.update(latest)
+
+
+def _best_effort_release(mapping: Dict[str, Any], path: Path, client: Any,
+                         lease: Dict[str, Any], status: str, result: str,
+                         original_error: Optional[BaseException] = None) -> None:
+    """Record lease completion without masking the operation that failed."""
+    try:
+        release_operation(mapping, path, client, lease, status, result)
+    except Exception as exc:
+        try:
+            latest = read_json(path)
+        except Exception:
+            latest = dict(mapping)
+        latest.setdefault("lease_release_errors", []).append({
+            "operation_id": lease.get("operation_id"),
+            "status": status,
+            "error": str(exc),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+        latest.setdefault("active_leases", {}).pop(lease.get("operation_id"), None)
+        try:
+            write_json(path, latest)
+            mapping.clear()
+            mapping.update(latest)
+        except Exception:
+            pass
+        if original_error is None:
+            raise UncertainWriteError(
+                "작업은 끝났지만 작업 기록의 종료 상태를 확인하지 못했습니다. Notion 작업 기록을 확인하세요."
+            ) from exc
+
+
+@contextmanager
+def operation_lease(mapping: Dict[str, Any], path: Path, client: Any, trip_key: str,
+                    operation_type: str, owner: str, target: str = "") -> Any:
+    lease = claim_operation(mapping, path, client, trip_key, operation_type, owner, target)
+    try:
+        yield lease
+    except ConflictError as exc:
+        _best_effort_release(mapping, path, client, lease, LEASE_CONFLICT, str(exc), exc)
+        raise
+    except Exception as exc:
+        _best_effort_release(mapping, path, client, lease, LEASE_REVIEW, str(exc), exc)
+        raise
+    else:
+        _best_effort_release(mapping, path, client, lease, LEASE_COMPLETED, "작업 완료")
+
+
 def seed_default_rows(manifest: Dict[str, Any], client: NotionClient, mapping: Dict[str, Any], mapping_path: Path) -> None:
     """Add generic, unassigned starter rows once; never copy personal trip data."""
     seed_rows = manifest.get("seed_rows", {})
@@ -857,6 +1148,47 @@ def parse_date(value: Optional[str], label: str) -> Optional[dt.date]:
         return dt.date.fromisoformat(value)
     except ValueError as exc:
         raise InstallerError(f"{label}은 YYYY-MM-DD 형식이어야 합니다: {value}") from exc
+
+
+def preview_trip_key(manifest: Dict[str, Any], destination: str,
+                     start_date: Optional[str], end_date: Optional[str],
+                     duration_days: Optional[int], traveler_count: int,
+                     currency: str, trip_name: Optional[str] = None) -> str:
+    """Validate scaffold inputs and derive the same identity used by scaffold."""
+    destination = destination.strip()
+    if not destination:
+        raise InstallerError("여행 목적지를 입력하세요.")
+    start = parse_date(start_date, "출발일")
+    end = parse_date(end_date, "종료일")
+    if start and end and end < start:
+        raise InstallerError("종료일은 출발일보다 빠를 수 없습니다.")
+    derived_days = (end - start).days + 1 if start and end else None
+    if duration_days is not None and (type(duration_days) is not int or duration_days < 1):
+        raise InstallerError("기간(일)은 1 이상의 정수여야 합니다.")
+    if derived_days and duration_days and derived_days != duration_days:
+        raise InstallerError("출발일·종료일과 기간(일)이 서로 다릅니다. 하나의 기준으로 다시 입력하세요.")
+    days = derived_days or duration_days
+    if not days:
+        raise InstallerError("출발일·종료일 또는 기간(일) 중 하나가 필요합니다.")
+    if type(traveler_count) is not int or traveler_count < 0:
+        raise InstallerError("여행 인원은 0 이상이어야 합니다.")
+    if currency not in {"KRW", "JPY", "USD", "EUR", "미정"}:
+        raise InstallerError("기준 통화는 KRW·JPY·USD·EUR·미정 중 하나여야 합니다.")
+    if start and not end:
+        end = start + dt.timedelta(days=days - 1)
+    elif end and not start:
+        start = end - dt.timedelta(days=days - 1)
+    trip_title = (trip_name or f"✈️ {destination} 여행").strip()
+    fingerprint = json.dumps([
+        destination,
+        start.isoformat() if start else None,
+        end.isoformat() if end else None,
+        days,
+        traveler_count,
+        currency,
+        trip_title,
+    ], ensure_ascii=False)
+    return stable_key("trip", manifest.get("template_key"), fingerprint)
 
 
 def _scaffold_trip_unlocked(
@@ -1066,18 +1398,26 @@ def scaffold_trip(
     mapping = read_json(mapping_path)
     workspace_key = str(mapping.get("parent_page_id") or "unknown")
     with operation_locks(mapping_path, workspace_key, "scaffold"):
-        return _scaffold_trip_unlocked(
-            manifest,
-            client,
-            mapping_path,
-            destination,
-            start_date,
-            end_date,
-            duration_days,
-            traveler_count,
-            currency,
-            trip_name,
+        mapping = read_json(mapping_path)
+        ensure_operation_log(mapping, mapping_path, client)
+        trip_key = preview_trip_key(
+            manifest, destination, start_date, end_date, duration_days,
+            traveler_count, currency, trip_name,
         )
+        owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
+        with operation_lease(mapping, mapping_path, client, trip_key, "scaffold", owner, destination):
+            return _scaffold_trip_unlocked(
+                manifest,
+                client,
+                mapping_path,
+                destination,
+                start_date,
+                end_date,
+                duration_days,
+                traveler_count,
+                currency,
+                trip_name,
+            )
 
 
 def plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -1170,6 +1510,7 @@ def _install_unlocked(manifest: Dict[str, Any], client: NotionClient, parent_id:
                        idempotency_key=stable_key("database", mapping.get("template_key"), key, parent))
 
     ensure_idempotency_schema(mapping, mapping_path, client)
+    ensure_operation_log(mapping, mapping_path, client)
     seed_default_rows(manifest, client, mapping, mapping_path)
 
     def render(key: str, blocks: List[Dict[str, Any]]) -> None:
