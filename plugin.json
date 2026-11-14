@@ -40,8 +40,8 @@
           "Souvenir로 기존 일정 수정"
         ],
         "brandColor": "#2F5D8A",
-        "logo": "./assets/souvenir-cover.png",
-        "composerIcon": "./assets/souvenir-cover.png"
+        "logo": "./assets/souvenir-icon.png",
+        "composerIcon": "./assets/souvenir-icon.png"
       }
     }
   }
