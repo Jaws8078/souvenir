@@ -205,22 +205,115 @@ def parse_place_lines(content: str) -> List[Dict[str, Any]]:
 
 
 def parse_shopping_lines(content: str) -> List[Dict[str, Any]]:
-    """Parse compact shopping rows without forcing optional fields."""
+    """Parse compact shopping rows and flag missing confirmation fields.
+
+    The original seven-column format remains supported::
+
+        품목 | 담당자 | 구매 장소 | 태그 | 예상 금액 | 결제 수단 | 메모
+
+    New input can put the two fields the wizard explicitly asks for first::
+
+        품목 | 담당자 | 구매 장소 | 수량 | 예상 금액 | 태그 | 결제 수단 | 메모
+
+    The short chat form also accepts either::
+
+        품목 | 예상 금액 | 수량 | 구매 장소
+        품목 | 수량 | 구매 장소 | 예상 금액
+
+    A name-only row is never treated as complete.  ``정보 상태`` and
+    ``추가 확인`` tell the caller which values must be confirmed before a
+    Notion write.
+    """
     records: List[Dict[str, Any]] = []
+
+    def shopping_number(raw: str) -> Optional[float]:
+        cleaned = text(raw).replace("개", "").replace("개입", "")
+        parsed = number(cleaned)
+        if parsed is not None:
+            return parsed
+        # Accept lightweight user formats such as ``JPY 1,200`` or
+        # ``1,200엔`` without treating arbitrary text as a price.
+        match = re.search(r"-?\d[\d,]*(?:\.\d+)?", cleaned)
+        return number(match.group(0)) if match else None
+
+    def compact_number(raw: str) -> Any:
+        parsed = shopping_number(raw)
+        if parsed is None:
+            return raw
+        return int(parsed) if parsed.is_integer() else parsed
+
     for line in re.split(r"[\r\n]+", content):
         cleaned = line.strip(" -*\t")
         if not cleaned:
             continue
         fields = [part.strip() for part in re.split(r"\s*\|\s*", cleaned)]
         record: Dict[str, Any] = {"품목": fields[0]}
-        names = ("담당 여행자", "구매 장소", "태그", "예상 금액", "결제 수단", "링크·메모")
-        for index, name in enumerate(names, start=1):
-            if len(fields) > index and fields[index]:
-                record[name] = fields[index]
-        if "예상 금액" in record:
-            parsed_amount = number(record["예상 금액"])
-            if parsed_amount is not None:
-                record["예상 금액"] = parsed_amount
+        if len(fields) > 1 and fields[1]:
+            record["담당 여행자"] = fields[1]
+        if len(fields) > 2 and fields[2]:
+            record["구매 장소"] = fields[2]
+
+        # Compact wizard input without an explicit 담당 여행자 is also
+        # accepted.  The two numeric fields are unambiguous enough for the
+        # common ``품목 | 예상 금액 | 수량 | 구매 장소`` form, while the
+        # alternate ``품목 | 수량 | 구매 장소 | 예상 금액`` form keeps the
+        # quantity-first phrasing natural in chat.
+        if len(fields) >= 4 and shopping_number(fields[1]) is not None:
+            first = shopping_number(fields[1])
+            second = shopping_number(fields[2]) if len(fields) > 2 else None
+            third = shopping_number(fields[3]) if len(fields) > 3 else None
+            if second is not None and third is None:
+                record.pop("담당 여행자", None)
+                record.pop("구매 장소", None)
+                record["예상 금액"] = compact_number(fields[1])
+                record["수량"] = compact_number(fields[2])
+                record["구매 장소"] = fields[3]
+                if len(fields) > 4 and fields[4]:
+                    record["태그"] = fields[4]
+                if len(fields) > 5 and fields[5]:
+                    record["링크·메모"] = fields[5]
+            elif second is None and third is not None:
+                record.pop("담당 여행자", None)
+                record.pop("구매 장소", None)
+                record["수량"] = compact_number(fields[1])
+                record["구매 장소"] = fields[2]
+                record["예상 금액"] = compact_number(fields[3])
+                if len(fields) > 4 and fields[4]:
+                    record["태그"] = fields[4]
+                if len(fields) > 5 and fields[5]:
+                    record["링크·메모"] = fields[5]
+
+        # If column four is numeric, use the explicit wizard format.  The
+        # older format starts with a tag (e.g. ``디저트``), so it remains
+        # backwards compatible without guessing from a free-text tag.
+        elif len(fields) > 3 and shopping_number(fields[3]) is not None:
+            record["수량"] = compact_number(fields[3])
+            if len(fields) > 4 and fields[4]:
+                record["예상 금액"] = compact_number(fields[4])
+            if len(fields) > 5 and fields[5]:
+                record["태그"] = fields[5]
+            if len(fields) > 6 and fields[6]:
+                record["결제 수단"] = fields[6]
+            if len(fields) > 7 and fields[7]:
+                record["링크·메모"] = fields[7]
+        else:
+            names = ("태그", "예상 금액", "결제 수단", "링크·메모")
+            for index, name in enumerate(names, start=3):
+                if len(fields) > index and fields[index]:
+                    record[name] = fields[index]
+            if "예상 금액" in record:
+                record["예상 금액"] = compact_number(record["예상 금액"])
+
+            # An optional quantity can be appended to the legacy format:
+            # ``... | 결제 수단 | 메모 | 수량``.
+            if len(fields) > 7 and shopping_number(fields[7]) is not None:
+                record["수량"] = compact_number(fields[7])
+
+        required = ("구매 장소", "수량", "예상 금액")
+        missing = [name for name in required if name not in record or record[name] in (None, "")]
+        record["정보 상태"] = "확인 필요" if missing else "입력 완료"
+        if missing:
+            record["추가 확인"] = missing
         records.append(record)
     return records
 
@@ -543,18 +636,59 @@ def notion_page_record(page: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def load_notion_snapshot(client: Any, mapping: Dict[str, Any], trip_id: str) -> Dict[str, Any]:
-    """Read only the DBs needed by checks, budget, and travel-mode refresh."""
+def _trip_scope_filter(candidates: Sequence[str]) -> Dict[str, Any]:
+    """Build a server-side Notion filter for one trip's rows."""
+    values = [text(item) for item in candidates if text(item)]
+    clauses = [
+        {"property": "여행 키", "rich_text": {"equals": candidate}}
+        for candidate in dict.fromkeys(values)
+    ]
+    if not clauses:
+        return {}
+    return clauses[0] if len(clauses) == 1 else {"or": clauses}
+
+
+def load_notion_snapshot(client: Any, mapping: Dict[str, Any], trip_id: str,
+                         command: Optional[str] = None) -> Dict[str, Any]:
+    """Read only the current trip's DB rows needed by one command.
+
+    Older installations may not have a ``여행 키`` column yet.  In that case
+    we fall back to a full read for compatibility, but new installations use
+    the server-side filter so companion/shopping rows from another trip never
+    leak into the dashboard and refreshes do not scan every row.
+    """
     trip_page = notion_page_record(client.get_page(trip_id))
-    keys = {"itinerary": "itinerary", "reservation": "reservation", "stay": "stay",
-            "wallet": "wallet", "expense": "expense", "place": "place", "shopping": "shopping"}
+    all_keys = {"itinerary": "itinerary", "reservation": "reservation", "stay": "stay",
+                "wallet": "wallet", "expense": "expense", "place": "place", "shopping": "shopping",
+                "traveler": "traveler", "split": "split", "settlement": "settlement",
+                "budget": "budget", "task": "task", "packing": "packing", "material": "material"}
+    needed_by_command = {
+        "check": {"itinerary", "reservation", "stay", "place", "traveler", "task", "packing"},
+        "budget": {"wallet", "expense", "traveler", "split", "settlement", "budget"},
+        "refresh": {"itinerary", "reservation", "stay", "wallet", "expense", "shopping", "material"},
+    }
+    selected = needed_by_command.get(command, set(all_keys))
+    candidates = [trip_id, text(trip_page.get("여행 키")), text(trip_page.get("여행")), text(trip_page.get("id"))]
+    scope_filter = _trip_scope_filter(candidates)
     snapshot: Dict[str, Any] = {"trip": trip_page}
-    for output_key, database_key in keys.items():
+    for output_key, database_key in all_keys.items():
         database_id = (mapping.get("databases") or {}).get(database_key)
         rows = []
-        if database_id:
-            rows = [notion_page_record(page) for page in client.query_database(database_id)]
-            rows = [row for row in rows if text(value(row, "travel_key")) in {trip_id, text(trip_page.get("여행"))}]
+        if output_key in selected and database_id:
+            try:
+                payload = {"filter": scope_filter} if scope_filter else None
+                rows = [notion_page_record(page) for page in client.query_database(database_id, payload)]
+                # Notion's rich_text filter is exact.  Keep a final local
+                # guard because legacy title-based rows may match the query.
+                allowed = {text(item) for item in candidates if text(item)}
+                rows = [row for row in rows if text(value(row, "travel_key")) in allowed]
+            except Exception:
+                # A pre-scope database can reject the filter.  Reading it once
+                # is slower, but preserves compatibility while still applying
+                # the same local scope guard.
+                rows = [notion_page_record(page) for page in client.query_database(database_id)]
+                allowed = {text(item) for item in candidates if text(item)}
+                rows = [row for row in rows if text(value(row, "travel_key")) in allowed]
         snapshot[output_key] = rows
     return snapshot
 
@@ -610,7 +744,7 @@ def load_source(args: argparse.Namespace) -> Dict[str, Any]:
     if not args.trip_id:
         raise ValueError("Notion 읽기에는 --trip-id가 필요합니다.")
     client = NotionClient(args.token)
-    return load_notion_snapshot(client, mapping, args.trip_id)
+    return load_notion_snapshot(client, mapping, args.trip_id, args.command)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

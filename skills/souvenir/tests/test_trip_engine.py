@@ -132,6 +132,28 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(rows[0]["예상 금액"], 1200.0)
         self.assertEqual(rows[0]["태그"], "디저트")
 
+    def test_shopping_import_requires_price_quantity_and_place(self):
+        rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 3개 | JPY 1,200 | 디저트 | 카드 | 선물용")
+        self.assertEqual(rows[0]["수량"], 3)
+        self.assertEqual(rows[0]["예상 금액"], 1200)
+        self.assertEqual(rows[0]["정보 상태"], "입력 완료")
+        self.assertNotIn("추가 확인", rows[0])
+
+        incomplete = engine.parse_shopping_lines("유자 킷캣 | 유성")
+        self.assertEqual(incomplete[0]["정보 상태"], "확인 필요")
+        self.assertEqual(set(incomplete[0]["추가 확인"]), {"구매 장소", "수량", "예상 금액"})
+
+        short = engine.parse_shopping_lines("유자 킷캣 | JPY 1,200 | 3개 | 하카타역 돈키호테")
+        self.assertEqual(short[0]["예상 금액"], 1200)
+        self.assertEqual(short[0]["수량"], 3)
+        self.assertEqual(short[0]["구매 장소"], "하카타역 돈키호테")
+        self.assertEqual(short[0]["정보 상태"], "입력 완료")
+
+        quantity_first = engine.parse_shopping_lines("유자 킷캣 | 3개 | 하카타역 돈키호테 | JPY 1,200")
+        self.assertEqual(quantity_first[0]["예상 금액"], 1200)
+        self.assertEqual(quantity_first[0]["수량"], 3)
+        self.assertEqual(quantity_first[0]["구매 장소"], "하카타역 돈키호테")
+
     def test_refresh_view_returns_today_next_deadlines_and_budget(self):
         view = engine.refresh_view(
             {"기준 통화": "JPY"},
@@ -165,6 +187,37 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(result["인원"], 3)
         self.assertTrue(result["완료"])
         self.assertEqual(result["날짜"], "2026-12-12")
+
+    def test_notion_snapshot_reads_only_current_trip_and_needed_databases(self):
+        class SnapshotClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_page(self, page_id):
+                return {"id": page_id, "properties": {
+                    "여행": {"type": "title", "title": [{"plain_text": "오사카 여행"}]},
+                    "여행 키": {"type": "rich_text", "rich_text": [{"plain_text": "trip-key"}]},
+                }}
+
+            def query_database(self, database_id, payload=None):
+                self.calls.append((database_id, payload))
+                return [
+                    {"id": "current", "properties": {"여행 키": {"type": "rich_text", "rich_text": [{"plain_text": "page-1"}]}}},
+                    {"id": "stale", "properties": {"여행 키": {"type": "rich_text", "rich_text": [{"plain_text": "other-trip"}]}}},
+                ]
+
+        client = SnapshotClient()
+        snapshot = engine.load_notion_snapshot(
+            client,
+            {"databases": {"itinerary": "itinerary-db", "reservation": "reservation-db", "stay": "stay-db",
+                            "wallet": "wallet-db", "expense": "expense-db", "shopping": "shopping-db",
+                            "material": "material-db"}},
+            "page-1",
+            "refresh",
+        )
+        self.assertEqual({call[0] for call in client.calls}, {"itinerary-db", "reservation-db", "stay-db", "wallet-db", "expense-db", "shopping-db", "material-db"})
+        self.assertNotIn("stale", {row["id"] for row in snapshot["itinerary"]})
+        self.assertTrue(client.calls[0][1]["filter"])
 
 
 class NotionClientExtensionTests(unittest.TestCase):

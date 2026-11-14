@@ -436,6 +436,29 @@ def validate_manifest(manifest: Dict[str, Any]) -> List[str]:
         currency = specs.get("통화")
         if not currency or currency.get("options") != ["KRW"] or currency.get("fixed") != "KRW":
             errors.append(f"{database_key}.통화는 KRW 고정 선택지여야 합니다.")
+    # A fresh install must never surface a generic sample trip.  The first
+    # real trip is created only after the user supplies its destination and
+    # dates; placeholder rows make dashboard filters point at stale data.
+    placeholder_titles = {"새 여행", "나의 다음 여행", "✈️ 새 여행"}
+    for key, rows in (manifest.get("seed_rows") or {}).items():
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("title") in placeholder_titles:
+                errors.append(f"seed_rows.{key}에 일반 여행 placeholder를 넣을 수 없습니다: {row['title']}")
+    # Every row-level database that can appear in a trip view needs the same
+    # scope key.  This is what prevents a new workspace from showing the
+    # previous trip's companion, shopping, or dashboard rows.
+    scoped_databases = {
+        "itinerary", "place", "shopping", "weather", "schedule_check",
+        "long_transport", "local_transport", "transport_service", "stay",
+        "reservation", "wallet", "budget", "expense", "traveler", "split",
+        "settlement", "decision", "task", "packing", "material",
+    }
+    for database in databases or []:
+        if not isinstance(database, dict) or database.get("key") not in scoped_databases:
+            continue
+        names = {prop.get("name") for prop in database.get("properties", []) if isinstance(prop, dict)}
+        if "여행 키" not in names:
+            errors.append(f"데이터베이스 {database.get('key')}에는 여행 키 속성이 필요합니다.")
     forbidden = ("app.notion.com", "notion.so", "collection://", "notion-file-block://")
     for text in iter_strings(manifest):
         if any(part in text for part in forbidden) or UUID_RE.search(text):
@@ -831,6 +854,41 @@ def ensure_database_row(mapping: Dict[str, Any], path: Path, client: Any,
         verify=lambda created: verify_created(client, created),
         idempotency_key=key,
     )
+
+
+def _has_trip_relation(client: Any, database_id: str) -> bool:
+    """Return whether a target database exposes the live template's 여행 relation.
+
+    The embedded fallback manifest intentionally creates portable databases
+    without cross-database relations.  A copied Notion template, however,
+    already has a ``여행`` relation.  Detect it at runtime so scaffolded rows
+    can be linked when available and remain portable when it is not.
+    """
+    getter = getattr(client, "get_database", None)
+    if not callable(getter):
+        return False
+    try:
+        payload = getter(database_id)
+    except Exception:
+        return False
+    properties = payload.get("properties", {}) if isinstance(payload, dict) else {}
+    relation = properties.get("여행") if isinstance(properties, dict) else None
+    return isinstance(relation, dict) and relation.get("type") == "relation"
+
+
+def _link_row_to_trip(client: Any, page_id: str, database_id: str,
+                      trip_id: str, relation_cache: Dict[str, bool]) -> None:
+    """Attach a row to its trip when the copied template supports relations."""
+    if not page_id or not trip_id:
+        return
+    if database_id not in relation_cache:
+        relation_cache[database_id] = _has_trip_relation(client, database_id)
+    if not relation_cache[database_id]:
+        return
+    updater = getattr(client, "update_page_properties", None)
+    if not callable(updater):
+        return
+    updater(page_id, {"여행": {"relation": [{"id": trip_id}]}})
 
 
 def ensure_idempotency_schema(mapping: Dict[str, Any], path: Path, client: Any) -> None:
@@ -1296,7 +1354,12 @@ def _scaffold_trip_unlocked(
 
     databases = {key: database_by_key(manifest, key)
                  for key in ("trip", "itinerary", "traveler", "wallet", "task", "packing")}
+    relation_cache: Dict[str, bool] = {}
     trip_values: Dict[str, Any] = {
+        # Keep the stable trip key on the summary row as well as on every
+        # child row.  Dashboard views can then filter by this value instead
+        # of inheriting a title or a relation from the template sample trip.
+        "여행 키": trip_key,
         "목적지": destination,
         "여행 상태": "계획 중",
         "인원": traveler_count if traveler_count else None,
@@ -1397,10 +1460,19 @@ def _scaffold_trip_unlocked(
         properties = seed_properties(databases[key], row)
 
         def record(created: Dict[str, Any]) -> None:
+            created_id = created.get("id") if isinstance(created, dict) else None
+            if isinstance(created_id, str):
+                _link_row_to_trip(
+                    client,
+                    created_id,
+                    mapping["databases"][key],
+                    result["trip_id"],
+                    relation_cache,
+                )
             if field == "wallet":
-                result[field] = created["id"]
+                result[field] = created_id
             else:
-                result[field].append(created["id"])
+                result[field].append(created_id)
 
         ensure_database_row(
             mapping,

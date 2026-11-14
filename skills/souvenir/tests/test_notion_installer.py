@@ -156,6 +156,16 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(len(first["seeded_rows"]["task"]), 15)
         self.assertEqual(len(first["seeded_rows"]["packing"]), 8)
 
+    def test_manifest_uses_free_text_for_personal_preferences(self):
+        traveler = ni.database_by_key(self.manifest, "traveler")
+        props = {item["name"]: item for item in traveler["properties"]}
+        for name in ("역할", "먹고 싶은 음식", "선호 이동", "숙소 취향", "주의사항", "추가 요청"):
+            self.assertEqual(props[name]["type"], "rich_text")
+        shopping = ni.database_by_key(self.manifest, "shopping")
+        shopping_props = {item["name"]: item for item in shopping["properties"]}
+        self.assertEqual(shopping_props["수량"]["type"], "number")
+        self.assertIn("정보 상태", shopping_props)
+
     def test_old_install_is_migrated_with_idempotency_property(self):
         self.install()
         mapping = ni.read_json(self.path)
@@ -215,6 +225,49 @@ class InstallerTests(unittest.TestCase):
         core_rows = self.core_row_ids()
         self.assertEqual(self.scaffold(), result)
         self.assertEqual(self.core_row_ids(), core_rows)
+
+    def test_scaffold_scopes_summary_and_child_rows_to_trip_key(self):
+        self.install()
+        result = self.scaffold(traveler_count=2)
+        trip_rows = [payload for kind, parent, payload, row_id in self.client.created
+                     if kind == "row" and parent == ni.read_json(self.path)["databases"]["trip"]
+                     and row_id == result["trip_id"]]
+        self.assertEqual(len(trip_rows), 1)
+        trip_key = next(
+            "".join(item.get("text", {}).get("content", "") for item in trip_rows[0]["여행 키"]["rich_text"])
+            for _ in [0]
+        )
+        self.assertTrue(trip_key.startswith("souvenir:"))
+        child_databases = {
+            ni.read_json(self.path)["databases"][key]
+            for key in ("itinerary", "traveler", "wallet", "task", "packing")
+        }
+        for kind, parent, payload, row_id in self.client.created:
+            if kind != "row" or parent not in child_databases:
+                continue
+            if "여행 키" in payload:
+                child_key = "".join(item.get("text", {}).get("content", "") for item in payload["여행 키"]["rich_text"])
+                self.assertEqual(child_key, result["trip_id"])
+
+    def test_scaffold_links_child_rows_when_template_has_trip_relation(self):
+        self.install()
+        mapping = ni.read_json(self.path)
+        traveler_db = mapping["databases"]["traveler"]
+        original_get_database = self.client.get_database
+
+        def get_database(database_id):
+            payload = original_get_database(database_id)
+            if database_id == traveler_db:
+                payload.setdefault("properties", {})["여행"] = {"type": "relation"}
+            return payload
+
+        self.client.get_database = get_database
+        result = self.scaffold(traveler_count=2)
+        traveler_rows = [payload for kind, parent, payload, row_id in self.client.created
+                         if kind == "row" and parent == traveler_db and row_id in result["travelers"]]
+        self.assertEqual(len(traveler_rows), 2)
+        for payload in traveler_rows:
+            self.assertEqual(payload["여행"]["relation"], [{"id": result["trip_id"]}])
 
     def test_scaffold_resumes_partial_trip(self):
         self.install()
