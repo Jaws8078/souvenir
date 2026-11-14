@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "souvenir",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Notion에 여행 계획을 만들고 수정하는 Souvenir 여행 도우미.",
   "author": {
     "name": "Jaws8078"
@@ -17,6 +17,7 @@
   ],
   "extensions": {
     "com.openai": {
+      "requires_local_executor": true,
       "onboardingSkill": "./skills/souvenir/SKILL.md",
       "interface": {
         "displayName": "Souvenir",
@@ -29,7 +30,8 @@
         "capabilities": [
           "Create Notion travel plans",
           "Update itineraries with confirmation",
-          "Manage reservations, stays, budgets, and packing tasks"
+          "Manage reservations, stays, budgets, and packing tasks",
+          "Run local travel checks and calculations"
         ],
         "defaultPrompt": [
           "Souvenir 설치 시작",

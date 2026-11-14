@@ -35,6 +35,16 @@ Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽
 - Python으로 일정 검사·예산 계산·입력 정리·파일 가져오기·여행 중 확인 화면을 만들 때: [Python 엔진](references/python-engine.md).
 - 공개 링크를 사용할 수 없어 코드로 재구축할 때만: [fallback 청사진](references/template-blueprint.md), [매니페스트](assets/template-manifest.json).
 
+## 로컬 실행기와 Python 엔진
+
+플러그인은 `requires_local_executor: true`로 배포된다. Codex·Claude Code·Gemini처럼 로컬 실행기를 제공하는 호스트에서는 사용자가 코드를 입력하지 않아도 Souvenir가 필요한 시점에 스킬 폴더의 `scripts/run_souvenir.py`를 호출한다. Python 엔진의 결과를 먼저 읽기 전용으로 만든 뒤, Notion 반영은 기존 승인 흐름을 따른다.
+
+- 첫 로컬 호출은 `python3 scripts/run_souvenir.py --status`로 실행기와 Python 준비 상태를 확인한다. 준비되지 않았으면 설치를 대신했다고 말하지 말고 실행 환경을 안내한다.
+- 일정 검사·예산 계산·입력 정리·여행 중 확인이 필요할 때는 `python3 scripts/run_souvenir.py check|budget|organize|import|refresh ...`를 사용한다. 사용자는 이 명령을 직접 입력하지 않는다.
+- Notion 데이터를 읽을 때는 설치 매핑과 여행 ID를 로컬 환경에서만 전달한다. 토큰·쿠키·비밀번호를 채팅에 요청하거나 출력하지 않는다.
+- 엔진은 기본적으로 페이지를 수정하지 않는다. 결과와 변경안을 사용자에게 보여주고 `반영`을 받은 뒤 Notion 도구로 필요한 행만 수정한다.
+- 로컬 실행기를 제공하지 않는 ChatGPT 웹·모바일 환경에서는 엔진 자동 호출을 주장하지 말고, Notion 플러그인 흐름과 수동 확인 경로를 사용한다.
+
 ## 공통 데이터 원칙
 
 - 디자인 원본은 사용자의 Notion 템플릿이다. 코드 매니페스트는 링크를 이용할 수 없을 때의 재구축용 스냅샷이며, 이를 원본과 완전히 같은 복제로 설명하지 않는다.

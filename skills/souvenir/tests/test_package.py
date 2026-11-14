@@ -24,9 +24,11 @@ class PackageTests(unittest.TestCase):
     def test_plugin_entry_and_media_exist(self):
         plugin = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
         extension = plugin["extensions"]["com.openai"]
+        self.assertTrue(extension["requires_local_executor"])
         for target in (extension["onboardingSkill"], extension["interface"]["logo"],
                        extension["interface"]["composerIcon"]):
             self.assertTrue((ROOT / target).is_file())
+        self.assertTrue((PACKAGE / "scripts" / "run_souvenir.py").is_file())
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8"))
         self.assertEqual(marketplace["plugins"][0]["name"], plugin["name"])
 

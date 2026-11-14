@@ -1,6 +1,6 @@
 # Souvenir Python 엔진
 
-`skills/souvenir/scripts/trip_engine.py`는 템플릿 디자인을 바꾸지 않고 여행 데이터를 검사·계산·정리하는 선택형 엔진이다. 연결된 Notion을 수정하기 전에 결과를 먼저 JSON으로 만들고, 스킬이 변경 요약과 사용자 반영 요청을 보여주는 구조를 사용한다.
+`skills/souvenir/scripts/trip_engine.py`는 템플릿 디자인을 바꾸지 않고 여행 데이터를 검사·계산·정리하는 선택형 엔진이다. 플러그인은 `requires_local_executor`를 선언하고 `scripts/run_souvenir.py`를 로컬 실행기 진입점으로 제공하므로, 지원되는 Codex·Claude Code·Gemini 환경에서는 사용자가 Python 명령을 직접 입력하지 않아도 스킬이 필요한 순간 엔진을 호출한다. 연결된 Notion을 수정하기 전에 결과를 먼저 JSON으로 만들고, 스킬이 변경 요약과 사용자 반영 요청을 보여주는 구조를 사용한다.
 
 ## 제공 기능
 
@@ -11,6 +11,16 @@
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약을 읽기 전용 화면용 JSON으로 만든다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 
 ## 오프라인 사용
+
+### 로컬 실행기 자동 호출
+
+호스트가 로컬 실행기를 지원하면 스킬은 먼저 아래 상태 확인을 수행한 뒤 필요한 하위 명령을 자동으로 실행한다.
+
+```bash
+python3 scripts/run_souvenir.py --status
+```
+
+사용자가 직접 명령을 입력할 필요는 없다. 직접 실행해야 하는 개발자·fallback 환경에서는 기존처럼 `trip_engine.py`를 호출해도 된다.
 
 여행 데이터를 JSON 스냅샷으로 준비하면 토큰 없이 검사할 수 있다.
 
@@ -44,4 +54,4 @@ NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/trip_engine.py refresh
 
 이 경로는 현재 일정·예약·숙소·장소·지갑·지출 DB를 읽어 결과를 만드는 단계다. 자동 수정은 하지 않으며, 스킬이 결과를 사용자에게 보여주고 `반영`을 받은 뒤 필요한 행만 Notion 도구로 수정한다. 토큰·쿠키·비밀번호는 JSON 스냅샷이나 매핑 파일에 저장하지 않는다.
 
-Python은 Notion 플러그인 안에서 임의로 백그라운드 실행되지 않는다. 대화에서 자동 호출하려면 이후에 이 엔진을 로컬 MCP 도구로 노출해야 하며, 그때 `check_trip`, `calculate_budget`, `organize_schedule`, `refresh_trip` 같은 도구 이름으로 연결한다.
+로컬 실행기는 사용자의 요청이 있을 때만 실행되며 백그라운드에서 계속 돌지 않는다. 로컬 실행기가 없는 ChatGPT 웹·모바일 환경에서는 Python 엔진을 자동 호출할 수 없고, Notion 플러그인과 채팅 안내만 사용할 수 있다. 별도 MCP 서버를 설치해야 하는 구조는 아니다.
