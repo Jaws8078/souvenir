@@ -142,6 +142,18 @@ python3 skills/souvenir/scripts/notion_installer.py install \
 
 `NOTION_TOKEN`은 Notion에서 직접 만든 공식 통합 토큰을 로컬 환경 변수로만 사용하고, 채팅·GitHub·`.souvenir-install.json`에는 넣지 않아요. 대상 상위 페이지에는 해당 통합을 연결하고 페이지/데이터베이스 생성 권한을 줘야 해요. 설치 결과는 대상 ID 매핑과 `template_source=code_rebuild`를 `.souvenir-install.json`에 남겨 중단 후 재개할 수 있어요.
 
+### Python 여행 엔진
+
+설치기와 별도로 [Python 여행 엔진](skills/souvenir/references/python-engine.md)을 사용하면 템플릿을 바꾸지 않고 일정·예산·파일 입력·여행 중 확인을 자동화할 수 있어요. `check`는 일정 겹침·이동 여유·예약 기한·오래된 장소 정보를 검사하고, `budget`은 지갑 잔액·사용률·분담 송금을 계산하며, `organize`와 `import`는 짧은 일정 문장·지도 링크·CSV·JSON·iCalendar 파일을 Notion 입력용 행으로 정리해요. `refresh`는 오늘/다음 일정·기한·숙소·지갑을 읽기 전용 JSON으로 만들어요.
+
+```bash
+python3 skills/souvenir/scripts/trip_engine.py check --input trip.json --pretty
+python3 skills/souvenir/scripts/trip_engine.py budget --input trip.json --base-currency JPY --rate JPY=0.009 --pretty
+python3 skills/souvenir/scripts/trip_engine.py refresh --input trip.json --now 2026-12-12T09:00:00 --pretty
+```
+
+Notion fallback 설치 기록이 있으면 `NOTION_TOKEN`, `--mapping`, `--trip-id`를 지정해 관련 DB를 읽을 수 있어요. 검사·계산·새로고침은 기본적으로 쓰기 작업을 하지 않으며, 결과를 확인한 뒤 Souvenir가 필요한 부분만 반영해요. Python은 플러그인 대화에서 저절로 백그라운드 실행되지 않으므로, 자동 호출이 필요하면 후속 단계에서 로컬 MCP 도구로 연결해야 해요.
+
 설치 후 API fallback에서 필수 정보와 일차 구조를 한 번에 만들려면 `scaffold`를 사용할 수 있어요. 출발일·종료일을 주면 실제 날짜가 일차에 채워지고, 기간만 주면 날짜 없이 일차만 준비돼요. 여행 인원이 있으면 동행자 행도 만들고, 기본 준비할 일 15개·준비물 8개·지갑 1개를 같은 여행 키로 연결해요.
 
 ```bash

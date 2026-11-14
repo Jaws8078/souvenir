@@ -32,6 +32,7 @@ Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽
 - 날씨·플랜 B/C·자료: [대안과 자료](references/alternatives.md). 플랜 B/C는 기존 일정의 속성으로 기록한다.
 - 일정 충돌·이동 여유·기한·필수 정보·최신성 점검: [검증 규칙](references/validation.md).
 - 화면 구성·인원 변경: [사용성과 인원 규칙](references/template-usability.md).
+- Python으로 일정 검사·예산 계산·입력 정리·파일 가져오기·여행 중 확인 화면을 만들 때: [Python 엔진](references/python-engine.md).
 - 공개 링크를 사용할 수 없어 코드로 재구축할 때만: [fallback 청사진](references/template-blueprint.md), [매니페스트](assets/template-manifest.json).
 
 ## 공통 데이터 원칙

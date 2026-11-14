@@ -444,6 +444,26 @@ class NotionClient:
         }
         return self.request("POST", "/pages", payload)
 
+    def query_database(self, database_id: str, payload: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Read every row from a database, following Notion's pagination cursor."""
+        body = dict(payload or {})
+        rows: List[Dict[str, Any]] = []
+        while True:
+            response = self.request("POST", f"/databases/{database_id}/query", body)
+            results = response.get("results", [])
+            if isinstance(results, list):
+                rows.extend(item for item in results if isinstance(item, dict))
+            if not response.get("has_more"):
+                return rows
+            cursor = response.get("next_cursor")
+            if not cursor:
+                return rows
+            body["start_cursor"] = cursor
+
+    def update_page_properties(self, page_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
+        """Update only explicitly supplied properties; callers must show a diff first."""
+        return self.request("PATCH", f"/pages/{page_id}", {"properties": properties})
+
     def append_blocks(self, block_id: str, blocks: List[Dict[str, Any]]) -> None:
         for offset in range(0, len(blocks), BLOCK_BATCH_SIZE):
             self.request("PATCH", f"/blocks/{block_id}/children",
