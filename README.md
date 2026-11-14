@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/souvenir-icon.png" alt="Souvenir icon" width="176" />
+  <img src="assets/souvenir-icon.png" alt="Souvenir icon" width="208" />
 </p>
 
 <h1 align="center">Souvenir · 여행 도우미</h1>
