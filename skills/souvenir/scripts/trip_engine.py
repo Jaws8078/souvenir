@@ -216,6 +216,104 @@ def parse_place_lines(content: str, *, resolve_short_links: bool = True,
     return records
 
 
+def _location_token(value_: Any) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", text(value_).lower())
+
+
+def _place_match_status(destination: str, region: str,
+                        evidence: Optional[Dict[str, Any]] = None) -> str:
+    """Return a conservative destination check for a place candidate."""
+    evidence = evidence or {}
+    explicit = evidence.get("destination_match", evidence.get("여행지 일치"))
+    if isinstance(explicit, bool):
+        return "확인 완료" if explicit else "불일치"
+    if text(evidence.get("matched_destination")):
+        matched = _location_token(evidence.get("matched_destination"))
+        destination_token = _location_token(destination)
+        if matched and destination_token and (destination_token in matched or matched in destination_token):
+            return "확인 완료"
+        if matched:
+            return "불일치"
+    destination_token = _location_token(destination)
+    region_token = _location_token(region)
+    if destination_token and region_token:
+        if destination_token in region_token or region_token in destination_token:
+            return "확인 완료"
+        # A short district name such as ``하카타`` cannot be safely compared to
+        # ``후쿠오카`` without geocoding evidence.  Keep it pending rather than
+        # falsely rejecting a valid place.
+    return "확인 필요"
+
+
+def prepare_place_confirmation(content: str, destination: str = "",
+                              evidence: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+    """Prepare a place list for destination review before a Notion write.
+
+    ``evidence`` is supplied by the host's web/Maps lookup and may contain a
+    place name, ``destination_match`` boolean, ``matched_destination`` and a
+    source URL.  Without evidence the result remains ``확인 필요``; this keeps
+    an odd or unrelated link out of the saved place library.
+    """
+    rows = parse_place_lines(content)
+    destination_text = text(destination)
+    evidence_by_name: Dict[str, Dict[str, Any]] = {}
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        name = text(item.get("장소") or item.get("name") or item.get("place"))
+        if name:
+            evidence_by_name[_location_token(name)] = item
+
+    confirmed_rows: List[Dict[str, Any]] = []
+    needs_review: List[Dict[str, Any]] = []
+    for row in rows:
+        evidence_item = evidence_by_name.get(_location_token(row.get("장소")))
+        status = _place_match_status(destination_text, text(row.get("지역")), evidence_item)
+        if evidence_item:
+            source = text(evidence_item.get("출처") or evidence_item.get("source") or evidence_item.get("url"))
+            if source and not row.get("출처"):
+                row["출처"] = source
+            if evidence_item.get("지역") and not row.get("지역"):
+                row["지역"] = text(evidence_item["지역"])
+        row["여행지 확인"] = status
+        row["저장 가능"] = status == "확인 완료"
+        if status == "확인 완료":
+            confirmed_rows.append(row)
+        else:
+            row["추가 확인"] = ["여행지와 장소의 일치 여부"]
+            needs_review.append(row)
+    return {
+        "목적지": destination_text,
+        "장소": rows,
+        "확인 완료": confirmed_rows,
+        "검토 필요": needs_review,
+        "저장 가능": bool(rows) and not needs_review,
+        "확인 질문": (
+            "여행지와 맞지 않거나 확인되지 않은 장소가 있습니다. 확인 후 저장할까요?"
+            if needs_review else "이 장소 목록을 저장할까요?"
+        ),
+    }
+
+
+def confirm_place_rows(packet: Dict[str, Any], approved_places: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Apply an explicit user approval to pending place candidates."""
+    if not isinstance(packet, dict):
+        raise ValueError("장소 확인 패킷이 올바르지 않습니다.")
+    approved = {_location_token(item) for item in approved_places if text(item)}
+    result: List[Dict[str, Any]] = []
+    for raw in packet.get("장소", []):
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        if _location_token(row.get("장소")) in approved:
+            row["여행지 확인"] = "사용자 확인 완료"
+            row["저장 가능"] = True
+            row.pop("추가 확인", None)
+        if row.get("저장 가능"):
+            result.append(row)
+    return result
+
+
 def parse_shopping_lines(content: str) -> List[Dict[str, Any]]:
     """Parse compact shopping rows and flag missing confirmation fields.
 
@@ -959,13 +1057,15 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir Python travel engine")
-    parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh", "shopping"])
+    parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh", "shopping", "places"])
     parser.add_argument("--input", type=Path, help="JSON 스냅샷 또는 가져올 파일")
     parser.add_argument("--kind", choices=["auto", "itinerary", "place", "shopping", "link", "csv", "json", "ics", "expense"], default="auto")
     parser.add_argument("--text", help="organize/import에서 직접 받을 텍스트")
     parser.add_argument("--item-name", help="shopping 조사 대상 품목명")
     parser.add_argument("--candidate-input", type=Path, help="shopping 외부 검색 후보 JSON")
     parser.add_argument("--candidate-index", type=int, help="확인할 후보 번호(0부터 시작)")
+    parser.add_argument("--evidence-input", type=Path, help="places 외부 지도/검색 확인 JSON")
+    parser.add_argument("--approved-places", help="확인 후 저장을 허용할 장소명(쉼표 구분)")
     parser.add_argument("--traveler", help="확인된 쇼핑 행의 담당 여행자")
     parser.add_argument("--confirm", action="store_true", help="선택한 후보를 사용자 확인 완료로 표시")
     parser.add_argument("--destination", help="shopping 조사 검색어에 넣을 목적지")
@@ -1014,7 +1114,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         rates = parse_rates(args.rate)
-        if args.command == "shopping":
+        if args.command == "places":
+            if args.text is not None:
+                content = args.text
+            elif args.input:
+                content = args.input.read_text(encoding="utf-8-sig")
+            else:
+                raise ValueError("places에는 --text 또는 --input이 필요합니다.")
+            evidence: List[Dict[str, Any]] = []
+            if args.evidence_input:
+                loaded = json.loads(args.evidence_input.read_text(encoding="utf-8-sig"))
+                raw_evidence = loaded.get("evidence", loaded.get("근거", loaded)) if isinstance(loaded, dict) else loaded
+                if isinstance(raw_evidence, dict):
+                    raw_evidence = [raw_evidence]
+                if isinstance(raw_evidence, list):
+                    evidence = [item for item in raw_evidence if isinstance(item, dict)]
+            packet = prepare_place_confirmation(content, args.destination or "", evidence)
+            if args.approved_places:
+                packet["승인된 장소"] = confirm_place_rows(
+                    packet,
+                    [item.strip() for item in args.approved_places.split(",") if item.strip()],
+                )
+            result = packet
+        elif args.command == "shopping":
             item_name = args.item_name or args.text
             if not item_name:
                 raise ValueError("shopping에는 --item-name 또는 --text가 필요합니다.")

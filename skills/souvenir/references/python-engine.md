@@ -10,6 +10,7 @@
 - `import`: 표준 라이브러리만 사용해 UTF-8 CSV, JSON, iCalendar(`.ics`), 텍스트 장소 목록과 지도 링크를 읽는다. Google Maps 공유 단축 링크(`maps.app.goo.gl`, `goo.gl/maps`)는 리디렉션을 따라 최종 주소에서 장소명을 추출한다. 링크가 만료·차단돼 해석되지 않으면 호스트명을 장소명으로 저장하지 않고 `확인 필요` 상태를 반환한다. PDF·이미지 OCR은 별도 승인과 도구가 필요한 후속 범위다.
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약을 읽기 전용 화면용 JSON으로 만든다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 - `shopping`: 품목명만 받은 요청을 조사 후보 확인 패킷으로 만들거나, 외부 검색 결과 JSON에서 선택한 후보를 `사용자 확인 완료` 상태의 저장 준비 행으로 정규화한다. 검색 자체는 호스트의 웹·이미지 도구가 수행하고, 엔진은 값을 추정하지 않는다.
+- `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다.
 
 ## 오프라인 사용
 
@@ -49,6 +50,12 @@ python3 skills/souvenir/scripts/run_souvenir.py shopping \
 python3 skills/souvenir/scripts/run_souvenir.py shopping \
   --item-name '유자 킷캣' --candidate-input shopping-candidates.json \
   --candidate-index 0 --traveler '동행자 1' --base-currency JPY --confirm --pretty
+
+# 여러 장소를 목적지와 대조한다. evidence가 없으면 확인 필요로 남긴다.
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 \
+  --text $'오호리 공원 | 후쿠오카 | 관광\n도쿄 타워 | 도쿄 | 관광' \
+  --evidence-input place-evidence.json --pretty
 ```
 
 단축 링크도 같은 방식으로 가져올 수 있다. 네트워크에서 최종 주소를 확인할 수 없을 때는 저장하지 않고 확인 요청용 결과를 만든다.

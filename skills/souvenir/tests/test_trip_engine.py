@@ -149,6 +149,26 @@ class TripEngineTests(unittest.TestCase):
             self.assertEqual(row["추가 확인"], ["장소명"])
             self.assertNotEqual(row["장소"], "maps.app.goo.gl")
 
+    def test_place_confirmation_holds_unknown_or_mismatched_destinations(self):
+        packet = engine.prepare_place_confirmation(
+            "오호리 공원 | 후쿠오카 | 관광 | https://maps.google.com/?query=Ohori\n"
+            "도쿄 타워 | 도쿄 | 관광",
+            "후쿠오카",
+            [{"장소": "오호리 공원", "destination_match": True,
+              "source": "https://example.com/ohori"},
+             {"장소": "도쿄 타워", "destination_match": False,
+              "source": "https://example.com/tokyo"}],
+        )
+        self.assertEqual(packet["장소"][0]["여행지 확인"], "확인 완료")
+        self.assertEqual(packet["장소"][1]["여행지 확인"], "불일치")
+        self.assertFalse(packet["저장 가능"])
+        self.assertEqual([row["장소"] for row in packet["확인 완료"]], ["오호리 공원"])
+
+    def test_place_confirmation_requires_evidence_when_region_is_ambiguous(self):
+        packet = engine.prepare_place_confirmation("오호리 공원 | 하카타 | 관광", "후쿠오카")
+        self.assertEqual(packet["장소"][0]["여행지 확인"], "확인 필요")
+        self.assertEqual(engine.confirm_place_rows(packet, ["오호리 공원"])[0]["여행지 확인"], "사용자 확인 완료")
+
     def test_shopping_import_preserves_optional_fields(self):
         rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")
         self.assertEqual(rows[0]["품목"], "유자 킷캣")
