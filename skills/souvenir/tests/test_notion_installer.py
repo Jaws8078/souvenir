@@ -769,6 +769,17 @@ class ClientTests(unittest.TestCase):
                 self.client.request("POST", "/pages", {})
         self.assertEqual(request.call_count, 4)
 
+    def test_request_metrics_include_retries_without_payload_data(self):
+        with patch.object(ni.urllib.request, "urlopen", side_effect=[
+            self.http_error(429), self.response({"id": "saved"})
+        ]), patch.object(ni.time, "sleep"):
+            self.assertEqual(self.client.request("POST", "/pages", {}), {"id": "saved"})
+        metrics = self.client.metrics.snapshot()
+        self.assertEqual(metrics["requests"], 1)
+        self.assertEqual(metrics["retries"], 1)
+        self.assertIn("elapsed_ms", metrics)
+        self.assertNotIn("test-token", json.dumps(metrics))
+
     def test_timeout_or_bad_response_is_uncertain(self):
         for result in (TimeoutError(), self.response(["invalid"]), self.response(None)):
             with self.subTest(result=result), patch.object(ni.urllib.request, "urlopen", side_effect=[result]):

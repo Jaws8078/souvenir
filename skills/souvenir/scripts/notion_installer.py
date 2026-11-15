@@ -17,6 +17,7 @@ auditable rebuild is preferred.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import hashlib
 import http.client
@@ -57,6 +58,63 @@ LEASE_COMPLETED = "완료"
 LEASE_CONFLICT = "충돌"
 LEASE_REVIEW = "확인 필요"
 LEASE_DEFAULT_MINUTES = 10
+
+
+class PerformanceMetrics:
+    """Small, secret-free timing recorder for one local operation.
+
+    The installer deliberately keeps this dependency-free.  Metrics are kept
+    in memory and returned with a save result so the host can explain where a
+    delay came from without logging tokens, page contents, or URLs.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        with getattr(self, "_lock", threading.Lock()):
+            self.started_at = time.perf_counter()
+            self.requests = 0
+            self.retries = 0
+            self.request_elapsed_ms = 0.0
+            self.phases: Dict[str, float] = {}
+
+    @contextmanager
+    def phase(self, name: str) -> Any:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - started) * 1000
+            with self._lock:
+                self.phases[name] = self.phases.get(name, 0.0) + elapsed
+
+    def record_request(self, attempts: int, elapsed_ms: float) -> None:
+        with self._lock:
+            self.requests += 1
+            self.retries += max(0, attempts - 1)
+            self.request_elapsed_ms += elapsed_ms
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "requests": self.requests,
+                "retries": self.retries,
+                "request_ms": round(self.request_elapsed_ms, 1),
+                "elapsed_ms": round((time.perf_counter() - self.started_at) * 1000, 1),
+                "phases_ms": {key: round(value, 1) for key, value in self.phases.items()},
+            }
+
+
+def _operation_metrics(client: Any) -> Optional[PerformanceMetrics]:
+    metrics = getattr(client, "metrics", None)
+    return metrics if isinstance(metrics, PerformanceMetrics) else None
+
+
+def _performance_result(client: Any) -> Dict[str, Any]:
+    metrics = _operation_metrics(client)
+    return {"performance": metrics.snapshot()} if metrics is not None else {}
 
 
 def _coordinator_client() -> Optional[CoordinatorClient]:
@@ -234,10 +292,15 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
 
 
 def check_pending(mapping: Dict[str, Any]) -> None:
-    if mapping.get("pending_operation"):
-        pending = mapping["pending_operation"]
-        if isinstance(pending, dict):
+    pending_value = mapping.get("pending_operation") or mapping.get("pending_operations")
+    if pending_value:
+        pending = pending_value
+        if isinstance(pending, dict) and "key" in pending:
             label = pending.get("key", "알 수 없는 작업")
+        elif isinstance(pending, dict):
+            label = f"{len(pending)}개 일괄 작업"
+        elif isinstance(pending, list):
+            label = f"{len(pending)}개 일괄 작업"
         else:
             label = pending
         raise InstallerError(
@@ -281,6 +344,70 @@ def recorded_write(mapping: Dict[str, Any], path: Path, key: str,
     record(result)
     mapping.pop("pending_operation")
     write_json(path, mapping)
+
+
+class BatchWriteJournal:
+    """Thread-safe checkpoint journal for bounded batch writes.
+
+    A single legacy ``pending_operation`` field is intentionally kept for
+    sequential operations.  Parallel rows use ``pending_operations`` so a
+    crash or uncertain response cannot be mistaken for a clean commit.
+    """
+
+    def __init__(self, mapping: Dict[str, Any], path: Path,
+                 entries: Sequence[tuple[str, Optional[str]]]) -> None:
+        self.mapping = mapping
+        self.path = path
+        self._lock = threading.RLock()
+        self._pending: Dict[str, Dict[str, Any]] = {}
+        for key, idempotency_key in entries:
+            self._pending[key] = {
+                "key": key,
+                "operation_id": uuid.uuid4().hex,
+                "idempotency_key": idempotency_key,
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "status": "pending",
+            }
+        self._flush()
+
+    def _flush(self) -> None:
+        with self._lock:
+            if self._pending:
+                self.mapping["pending_operations"] = copy_json(self._pending)
+            else:
+                self.mapping.pop("pending_operations", None)
+            write_json(self.path, self.mapping)
+
+    def _mark(self, key: str, status: str) -> None:
+        with self._lock:
+            if key in self._pending:
+                if status == "completed":
+                    self._pending.pop(key, None)
+                else:
+                    self._pending[key]["status"] = status
+                self._flush()
+
+    def run(self, key: str, action: Callable[[], Any],
+            record: Callable[[Any], None],
+            verify: Optional[Callable[[Any], None]] = None) -> Any:
+        try:
+            result = action()
+            if verify is not None:
+                verify(result)
+        except UncertainWriteError:
+            self._mark(key, "uncertain")
+            raise
+        except InstallerError:
+            self._mark(key, "rejected")
+            raise
+        record(result)
+        self._mark(key, "completed")
+        return result
+
+
+def copy_json(value: Any) -> Any:
+    """Copy JSON-compatible checkpoint data without importing copy globally."""
+    return json.loads(json.dumps(value, ensure_ascii=False))
 
 
 def iter_strings(value: Any) -> Iterable[str]:
@@ -525,6 +652,8 @@ class NotionClient:
     def __init__(self, token: str, api_version: str = "2022-06-28") -> None:
         self.token = token
         self.api_version = api_version
+        self.metrics = PerformanceMetrics()
+        self._souvenir_schema_cache: Dict[str, Dict[str, Any]] = {}
         self._rate_lock = threading.Lock()
         self._next_request_at = 0.0
         self._request_spacing = 0.05
@@ -555,54 +684,60 @@ class NotionClient:
         )
         read_only = method.upper() == "GET"
         error_type = InstallerError if read_only else UncertainWriteError
-        for attempt in range(4):
-            self._wait_for_rate_slot()
-            try:
-                with urllib.request.urlopen(request, timeout=30) as response:
-                    raw = response.read().decode("utf-8")
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")
-                exc.close()
+        started = time.perf_counter()
+        attempts = 0
+        try:
+            for attempt in range(4):
+                attempts += 1
+                self._wait_for_rate_slot()
                 try:
-                    parsed = json.loads(detail)
-                except json.JSONDecodeError:
-                    parsed = {}
-                if not isinstance(parsed, dict):
-                    parsed = {}
-                extra = parsed.get("additional_data") or {}
-                if not isinstance(extra, dict):
-                    extra = {}
-                blocked = extra.get("rate_limit_reason") == "public_api_request_blocked"
-                retryable = (exc.code in {429, 529} and not blocked) or (
-                    read_only and exc.code in {500, 502, 503, 504}
-                )
-                wait = (exc.headers.get("Retry-After") if exc.headers else None) or extra.get("retry_after")
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        raw = response.read().decode("utf-8")
+                except urllib.error.HTTPError as exc:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    exc.close()
+                    try:
+                        parsed = json.loads(detail)
+                    except json.JSONDecodeError:
+                        parsed = {}
+                    if not isinstance(parsed, dict):
+                        parsed = {}
+                    extra = parsed.get("additional_data") or {}
+                    if not isinstance(extra, dict):
+                        extra = {}
+                    blocked = extra.get("rate_limit_reason") == "public_api_request_blocked"
+                    retryable = (exc.code in {429, 529} and not blocked) or (
+                        read_only and exc.code in {500, 502, 503, 504}
+                    )
+                    wait = (exc.headers.get("Retry-After") if exc.headers else None) or extra.get("retry_after")
+                    try:
+                        delay = float(wait) if wait is not None else 2 ** attempt
+                    except (ValueError, TypeError):
+                        delay = 2 ** attempt
+                    if not math.isfinite(delay) or delay < 0:
+                        delay = 2 ** attempt
+                    # Do not retry early when the workspace asks for a longer pause.
+                    if retryable and attempt < 3 and delay <= 60:
+                        self._defer_requests(delay + random.uniform(0, 0.25))
+                        continue
+                    message = str(parsed.get("message", detail)).replace(self.token, "[redacted]")
+                    if not read_only and exc.code >= 500 and exc.code != 529:
+                        raise UncertainWriteError(f"Notion API {exc.code}: {message} (저장 여부 확인 필요)") from exc
+                    raise InstallerError(f"Notion API {exc.code}: {message}") from exc
+                except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+                    raise error_type("Notion API 연결이 끊겼습니다. 쓰기 작업은 저장 여부를 먼저 확인하세요.") from exc
+                except UnicodeError as exc:
+                    raise error_type("Notion API 응답을 UTF-8로 읽지 못했습니다.") from exc
                 try:
-                    delay = float(wait) if wait is not None else 2 ** attempt
-                except (ValueError, TypeError):
-                    delay = 2 ** attempt
-                if not math.isfinite(delay) or delay < 0:
-                    delay = 2 ** attempt
-                # Do not retry early when the workspace asks for a longer pause.
-                if retryable and attempt < 3 and delay <= 60:
-                    self._defer_requests(delay + random.uniform(0, 0.25))
-                    continue
-                message = str(parsed.get("message", detail)).replace(self.token, "[redacted]")
-                if not read_only and exc.code >= 500 and exc.code != 529:
-                    raise UncertainWriteError(f"Notion API {exc.code}: {message} (저장 여부 확인 필요)") from exc
-                raise InstallerError(f"Notion API {exc.code}: {message}") from exc
-            except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
-                raise error_type("Notion API 연결이 끊겼습니다. 쓰기 작업은 저장 여부를 먼저 확인하세요.") from exc
-            except UnicodeError as exc:
-                raise error_type("Notion API 응답을 UTF-8로 읽지 못했습니다.") from exc
-            try:
-                result = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeError) as exc:
-                raise error_type("Notion API 응답이 JSON이 아닙니다.") from exc
-            if not isinstance(result, dict):
-                raise error_type("Notion API 응답은 객체여야 합니다.")
-            return result
-        raise InstallerError("Notion API 재시도 한도를 초과했습니다.")
+                    result = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeError) as exc:
+                    raise error_type("Notion API 응답이 JSON이 아닙니다.") from exc
+                if not isinstance(result, dict):
+                    raise error_type("Notion API 응답은 객체여야 합니다.")
+                return result
+            raise InstallerError("Notion API 재시도 한도를 초과했습니다.")
+        finally:
+            self.metrics.record_request(attempts, (time.perf_counter() - started) * 1000)
 
     def get_page(self, page_id: str) -> Dict[str, Any]:
         return self.request("GET", f"/pages/{page_id}")
@@ -631,9 +766,11 @@ class NotionClient:
 
     def add_database_property(self, database_id: str, name: str) -> Dict[str, Any]:
         """Add the implementation key to an older fallback database."""
-        return self.request("PATCH", f"/databases/{database_id}", {
+        result = self.request("PATCH", f"/databases/{database_id}", {
             "properties": {name: {"rich_text": {}}},
         })
+        self._souvenir_schema_cache.pop(f"__schema__:{database_id}", None)
+        return result
 
     def create_database_page(self, database_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
         """Create a starter row in a database without requiring a user token in chat."""
@@ -660,7 +797,8 @@ class NotionClient:
             body["start_cursor"] = cursor
 
     def update_page_properties(self, page_id: str, properties: Dict[str, Any],
-                               expected_last_edited_time: Optional[str] = None) -> Dict[str, Any]:
+                               expected_last_edited_time: Optional[str] = None,
+                               verify_response: bool = True) -> Dict[str, Any]:
         """Patch selected properties with an optional optimistic version check.
 
         Notion does not expose a transaction in this client. When a caller has a
@@ -677,6 +815,8 @@ class NotionClient:
                     f"(기대 {expected_last_edited_time}, 현재 {actual})"
                 )
         result = self.request("PATCH", f"/pages/{page_id}", {"properties": properties})
+        if not verify_response:
+            return result
         try:
             verified = self.get_page(page_id)
         except Exception as exc:
@@ -923,6 +1063,10 @@ def _live_database_schema(client: Any, database_id: str,
     key = f"__schema__:{database_id}"
     if key in cache:
         return cache[key]
+    shared_cache = getattr(client, "_souvenir_schema_cache", None)
+    if isinstance(shared_cache, dict) and key in shared_cache:
+        cache[key] = shared_cache[key]
+        return cache[key]
     getter = getattr(client, "get_database", None)
     if not callable(getter):
         cache[key] = {}
@@ -933,6 +1077,8 @@ def _live_database_schema(client: Any, database_id: str,
         payload = {}
     properties = payload.get("properties", {}) if isinstance(payload, dict) else {}
     cache[key] = properties if isinstance(properties, dict) else {}
+    if isinstance(shared_cache, dict):
+        shared_cache[key] = cache[key]
     return cache[key]
 
 
@@ -1048,60 +1194,19 @@ def save_shopping_rows(manifest: Dict[str, Any], client: NotionClient,
         trip_key = value_text(trip_id)
         with distributed_lease(workspace_key, trip_key, "shopping-save", owner, database_id):
             with operation_lease(mapping, mapping_path, client, trip_key, "shopping-save", owner, database_id):
-                created: List[str] = []
-                updated: List[str] = []
-                database = database_by_key(manifest, "shopping")
-                relation_cache: Dict[str, bool] = {}
+                batch_entries: List[Dict[str, Any]] = []
                 for row in normalized:
                     key = _shopping_row_key(trip_id, row)
                     properties = _shopping_row_properties(manifest, row, trip_id, key)
-                    existing = find_existing_row(client, database_id, key)
-                    if existing:
-                        current = client.get_page(existing)
-                        expected = current.get("last_edited_time") if isinstance(current, dict) else None
-                        recorded_write(
-                            mapping,
-                            mapping_path,
-                            f"shopping:update:{key}",
-                            lambda: client.update_page_properties(existing, properties, expected),
-                            lambda _result: None,
-                            verify=lambda result: verify_updated(result, existing),
-                            idempotency_key=key,
-                        )
-                        _link_row_to_trip(client, existing, database_id, trip_id, relation_cache)
-                        updated.append(existing)
-                        continue
-
-                    holder: Dict[str, Any] = {}
-                    recorded_write(
-                        mapping,
-                        mapping_path,
-                        f"shopping:{key}",
-                        lambda: client.create_database_page(database_id, properties),
-                        lambda result: holder.update({"id": result.get("id")}),
-                        verify=lambda result: verify_created(client, result),
-                        idempotency_key=key,
-                    )
-                    created_id = holder.get("id")
-                    if not created_id:
-                        raise UncertainWriteError("쇼핑 행 생성 후 페이지 ID를 확인하지 못했습니다.")
-                    _link_row_to_trip(client, created_id, database_id, trip_id, relation_cache)
-                    created.append(created_id)
-                visible = _shopping_rows_for_trip(client, database_id, trip_id)
-                visible_keys = {
-                    value_text(_plain_property_text(row.get("properties", {}), IDEMPOTENCY_PROPERTY))
-                    for row in visible
-                }
-                expected_keys = {_shopping_row_key(trip_id, row) for row in normalized}
-                if not expected_keys.issubset(visible_keys):
-                    raise UncertainWriteError("쇼핑 저장 후 현재 여행의 실제 행을 다시 확인하지 못했습니다.")
-                return {
-                    "status": "complete",
-                    "trip_id": trip_id,
-                    "created": created,
-                    "updated": updated,
-                    "rows": visible,
-                }
+                    batch_entries.append({
+                        "database_key": "shopping",
+                        "row": row,
+                        "stable": key,
+                        "properties": properties,
+                    })
+                return _persist_row_batch(
+                    manifest, client, mapping_path, mapping, trip_id, "shopping", batch_entries,
+                )
 
 
 def _traveler_row_properties(manifest: Dict[str, Any], row: Dict[str, Any],
@@ -1182,10 +1287,7 @@ def save_traveler_profiles(manifest: Dict[str, Any], client: NotionClient,
         ensure_operation_log(mapping, mapping_path, client)
         with distributed_lease(workspace_key, trip_id, "traveler-save", owner, database_id):
             with operation_lease(mapping, mapping_path, client, trip_id, "traveler-save", owner, database_id):
-                created: List[str] = []
-                updated: List[str] = []
-                relation_cache: Dict[str, bool] = {}
-                keys: List[str] = []
+                batch_entries: List[Dict[str, Any]] = []
                 for index, profile in enumerate(normalized, start=1):
                     name = str(profile.get("여행자") or profile.get("이름") or f"동행자 {index}").strip()
                     profile["여행자"] = name
@@ -1193,53 +1295,16 @@ def save_traveler_profiles(manifest: Dict[str, Any], client: NotionClient,
                     # scaffold_trip keys traveler rows with the summary row's
                     # stable 여행 키, not its opaque Notion page ID.
                     key = stable_key("trip", trip_key, "traveler", index)
-                    keys.append(key)
                     properties = _traveler_row_properties(manifest, profile, trip_id, key)
-                    existing = find_existing_row(client, database_id, key)
-                    if existing:
-                        current = client.get_page(existing)
-                        expected = current.get("last_edited_time") if isinstance(current, dict) else None
-                        recorded_write(
-                            mapping,
-                            mapping_path,
-                            f"traveler:update:{key}",
-                            lambda: client.update_page_properties(existing, properties, expected),
-                            lambda _result: None,
-                            verify=lambda result: verify_updated(result, existing),
-                            idempotency_key=key,
-                        )
-                        _link_row_to_trip(client, existing, database_id, trip_id, relation_cache)
-                        updated.append(existing)
-                        continue
-                    holder: Dict[str, Any] = {}
-                    recorded_write(
-                        mapping,
-                        mapping_path,
-                        f"traveler:{key}",
-                        lambda: client.create_database_page(database_id, properties),
-                        lambda result: holder.update({"id": result.get("id")}),
-                        verify=lambda result: verify_created(client, result),
-                        idempotency_key=key,
-                    )
-                    created_id = holder.get("id")
-                    if not created_id:
-                        raise UncertainWriteError("동행자 행 생성 후 페이지 ID를 확인하지 못했습니다.")
-                    _link_row_to_trip(client, created_id, database_id, trip_id, relation_cache)
-                    created.append(created_id)
-                visible = _traveler_rows_for_trip(client, database_id, trip_id)
-                visible_keys = {
-                    _plain_property_text(row.get("properties", {}), IDEMPOTENCY_PROPERTY)
-                    for row in visible
-                }
-                if not set(keys).issubset(visible_keys):
-                    raise UncertainWriteError("동행자 저장 후 현재 여행의 실제 행을 다시 확인하지 못했습니다.")
-                return {
-                    "status": "complete",
-                    "trip_id": trip_id,
-                    "created": created,
-                    "updated": updated,
-                    "rows": visible,
-                }
+                    batch_entries.append({
+                        "database_key": "traveler",
+                        "row": profile,
+                        "stable": key,
+                        "properties": properties,
+                    })
+                return _persist_row_batch(
+                    manifest, client, mapping_path, mapping, trip_id, "traveler", batch_entries,
+                )
 
 
 PART_SAVE_DATABASES = {
@@ -1439,6 +1504,9 @@ def save_trip_fields(manifest: Dict[str, Any], client: NotionClient,
         ensure_operation_log(mapping, mapping_path, client)
         with distributed_lease(workspace_key, trip_id, "trip-save", owner, database_id):
             with operation_lease(mapping, mapping_path, client, trip_id, "trip-save", owner, database_id):
+                metrics = _operation_metrics(client)
+                if metrics is not None:
+                    metrics.reset()
                 current = client.get_page(trip_id)
                 expected = current.get("last_edited_time") if isinstance(current, dict) else None
                 recorded_write(
@@ -1449,8 +1517,10 @@ def save_trip_fields(manifest: Dict[str, Any], client: NotionClient,
                     idempotency_key=stable_key("trip-update", trip_id, sorted(properties)),
                 )
                 _link_row_to_trip(client, trip_id, database_id, trip_id, {})
-                return {"status": "complete", "part": "trip", "trip_id": trip_id,
-                        "updated": [trip_id], "created": [], "properties": sorted(properties)}
+                result = {"status": "complete", "part": "trip", "trip_id": trip_id,
+                          "updated": [trip_id], "created": [], "properties": sorted(properties)}
+                result.update(_performance_result(client))
+                return result
 
 
 def save_part_rows(manifest: Dict[str, Any], client: NotionClient,
@@ -1509,12 +1579,8 @@ def save_part_rows(manifest: Dict[str, Any], client: NotionClient,
         target = ",".join(sorted(set(database_keys)))
         with distributed_lease(workspace_key, trip_id, f"{key}-save", owner, target):
             with operation_lease(mapping, mapping_path, client, trip_id, f"{key}-save", owner, target):
-                created: List[str] = []
-                updated: List[str] = []
-                relation_cache: Dict[str, bool] = {}
-                visible_rows: List[Dict[str, Any]] = []
+                batch_entries: List[Dict[str, Any]] = []
                 for index, (database_key, row, source_index) in enumerate(entries, start=1):
-                    database_id = mapping["databases"][database_key]
                     title = _part_title(key, row)
                     if key == "itinerary" and row.get("일차") not in (None, ""):
                         # scaffold_trip already created one row per day with
@@ -1526,43 +1592,17 @@ def save_part_rows(manifest: Dict[str, Any], client: NotionClient,
                     else:
                         stable = stable_key("trip", trip_key, key, database_key, source_index)
                     properties = _part_row_properties(manifest, database_key, row, trip_id, stable)
-                    existing = find_existing_row(client, database_id, stable)
-                    if existing:
-                        current = client.get_page(existing)
-                        expected = current.get("last_edited_time") if isinstance(current, dict) else None
-                        recorded_write(
-                            mapping, mapping_path, f"{key}:update:{stable}",
-                            lambda existing=existing, properties=properties, expected=expected:
-                                client.update_page_properties(existing, properties, expected),
-                            lambda _result: None,
-                            verify=lambda result, existing=existing: verify_updated(result, existing),
-                            idempotency_key=stable,
-                        )
-                        _link_row_to_trip(client, existing, database_id, trip_id, relation_cache)
-                        updated.append(existing)
-                        continue
-                    holder: Dict[str, Any] = {}
-                    recorded_write(
-                        mapping, mapping_path, f"{key}:create:{stable}",
-                        lambda database_id=database_id, properties=properties:
-                            client.create_database_page(database_id, properties),
-                        lambda result: holder.update({"id": result.get("id")}),
-                        verify=lambda result: verify_created(client, result),
-                        idempotency_key=stable,
-                    )
-                    created_id = holder.get("id")
-                    if not created_id:
-                        raise UncertainWriteError("파트 행 생성 후 페이지 ID를 확인하지 못했습니다.")
-                    _link_row_to_trip(client, created_id, database_id, trip_id, relation_cache)
-                    created.append(created_id)
-                for database_key in sorted(set(database_keys)):
-                    database_id = mapping["databases"][database_key]
-                    scoped = _rows_for_trip(client, database_id, trip_id)
-                    visible_rows.extend(scoped)
-                return {
-                    "status": "complete", "part": key, "trip_id": trip_id,
-                    "created": created, "updated": updated, "rows": visible_rows,
-                }
+                    batch_entries.append({
+                        "database_key": database_key,
+                        "row": row,
+                        "stable": stable,
+                        "properties": properties,
+                    })
+                result = _persist_row_batch(
+                    manifest, client, mapping_path, mapping, trip_id, key, batch_entries,
+                )
+                result["part"] = key
+                return result
 
 
 def _has_trip_relation(client: Any, database_id: str) -> bool:
@@ -1623,6 +1663,193 @@ def _link_row_to_trip(client: Any, page_id: str, database_id: str,
     if not updates or not callable(updater):
         return
     updater(page_id, updates)
+
+
+def _batch_worker_limit(size: int) -> int:
+    """Return a conservative, user-tunable write concurrency limit."""
+    try:
+        configured = int(os.environ.get("SOUVENIR_WRITE_CONCURRENCY", "4"))
+    except (TypeError, ValueError):
+        configured = 4
+    return max(1, min(5, configured, max(1, size)))
+
+
+def _page_stable_key(row: Dict[str, Any]) -> str:
+    properties = row.get("properties", {}) if isinstance(row, dict) else {}
+    return _plain_property_text(properties, IDEMPOTENCY_PROPERTY).strip()
+
+
+def _build_row_index(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index one prefetched trip scope and reject ambiguous duplicate keys."""
+    indexed: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        key = _page_stable_key(row)
+        if not key:
+            continue
+        if key in indexed:
+            raise ConflictError(f"같은 Souvenir 작업 키가 여러 행에 있습니다: {key}")
+        indexed[key] = row
+    return indexed
+
+
+def _visibility_properties(schema: Dict[str, Any], trip_id: str) -> Dict[str, Any]:
+    """Encode copied-template relation/marker fields into the main write."""
+    properties: Dict[str, Any] = {}
+    relation = schema.get("여행") if isinstance(schema, dict) else None
+    if isinstance(relation, dict) and relation.get("type") == "relation":
+        properties["여행"] = {"relation": [{"id": trip_id}]}
+    marker = schema.get("구분") if isinstance(schema, dict) else None
+    if isinstance(marker, dict) and marker.get("type") in {"select", "status"}:
+        properties["구분"] = (
+            {"status": {"name": "사용 중"}}
+            if marker.get("type") == "status"
+            else {"select": {"name": "사용 중"}}
+        )
+    return properties
+
+
+def _update_without_post_read(client: Any, page_id: str,
+                              properties: Dict[str, Any],
+                              expected: Optional[str]) -> Dict[str, Any]:
+    """Use the PATCH response in a batch; final DB reread verifies visibility."""
+    updater = getattr(client, "update_page_properties", None)
+    if not callable(updater):
+        raise InstallerError("Notion 클라이언트가 페이지 수정을 지원하지 않습니다.")
+    try:
+        return updater(page_id, properties, expected, verify_response=False)
+    except TypeError as exc:
+        # Offline adapters and older host clients may not know the optional
+        # flag.  They retain the safe, slower per-row verification path.
+        if "verify_response" not in str(exc):
+            raise
+        return updater(page_id, properties, expected)
+
+
+def _verify_page_reference(result: Any, message: str) -> None:
+    if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not result["id"]:
+        raise UncertainWriteError(message)
+
+
+def _persist_row_batch(manifest: Dict[str, Any], client: Any,
+                       mapping_path: Path, mapping: Dict[str, Any],
+                       trip_id: str, operation_name: str,
+                       entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Persist normalized rows with one prefetch, bounded fan-out, and one verification per DB."""
+    if not entries:
+        return {"status": "skipped", "created": [], "updated": [], "rows": [], **_performance_result(client)}
+
+    metrics = _operation_metrics(client)
+    if metrics is not None:
+        metrics.reset()
+
+    database_ids = {
+        entry["database_key"]: mapping["databases"][entry["database_key"]]
+        for entry in entries
+    }
+    schema_cache: Dict[str, Any] = {}
+    existing_by_database: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    with metrics.phase("prefetch") if metrics else _null_context():
+        for database_key, database_id in database_ids.items():
+            schema = _live_database_schema(client, database_id, schema_cache)
+            rows = _rows_for_trip(client, database_id, trip_id, schema_cache)
+            existing_by_database[database_key] = _build_row_index(rows)
+            for entry in entries:
+                if entry["database_key"] == database_key:
+                    entry["schema"] = schema
+
+    journal_entries: List[tuple[str, Optional[str]]] = []
+    seen_keys: set[str] = set()
+    for entry in entries:
+        journal_key = f"{operation_name}:{entry['database_key']}:{entry['stable']}"
+        if journal_key in seen_keys:
+            raise ConflictError(f"한 번의 반영에 같은 작업 키가 중복되었습니다: {journal_key}")
+        seen_keys.add(journal_key)
+        entry["journal_key"] = journal_key
+        journal_entries.append((journal_key, entry["stable"]))
+
+    journal = BatchWriteJournal(mapping, mapping_path, journal_entries)
+    created: List[str] = []
+    updated: List[str] = []
+    results_lock = threading.Lock()
+
+    def write_one(entry: Dict[str, Any]) -> tuple[str, str]:
+        database_key = entry["database_key"]
+        database_id = database_ids[database_key]
+        existing = existing_by_database[database_key].get(entry["stable"])
+        properties = dict(entry["properties"])
+        properties.update(_visibility_properties(entry.get("schema", {}), trip_id))
+        if existing:
+            page_id = str(existing.get("id") or "")
+            if not page_id:
+                raise UncertainWriteError("기존 Notion 행의 페이지 ID를 확인하지 못했습니다.")
+            expected = existing.get("last_edited_time")
+            if not expected:
+                current = client.get_page(page_id)
+                expected = current.get("last_edited_time") if isinstance(current, dict) else None
+            result = journal.run(
+                entry["journal_key"],
+                lambda: _update_without_post_read(client, page_id, properties, expected),
+                lambda _result: None,
+                verify=lambda value: verify_updated(value, page_id),
+            )
+            _verify_page_reference(result, "수정된 Notion 행의 페이지 ID를 확인하지 못했습니다.")
+            with results_lock:
+                updated.append(page_id)
+            return "updated", page_id
+
+        result = journal.run(
+            entry["journal_key"],
+            lambda: client.create_database_page(database_id, properties),
+            lambda _result: None,
+            verify=lambda value: _verify_page_reference(value, "생성된 Notion 행의 페이지 ID를 확인하지 못했습니다."),
+        )
+        page_id = str(result.get("id"))
+        with results_lock:
+            created.append(page_id)
+        return "created", page_id
+
+    errors: List[BaseException] = []
+    with metrics.phase("write") if metrics else _null_context():
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=_batch_worker_limit(len(entries)),
+            thread_name_prefix="souvenir-write",
+        ) as executor:
+            futures = [executor.submit(write_one, entry) for entry in entries]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except BaseException as exc:  # Preserve all journal entries before surfacing the first error.
+                    errors.append(exc)
+    if errors:
+        raise errors[0]
+
+    visible_rows: List[Dict[str, Any]] = []
+    with metrics.phase("verify") if metrics else _null_context():
+        for database_key, database_id in database_ids.items():
+            scoped = _rows_for_trip(client, database_id, trip_id, schema_cache)
+            visible_rows.extend(scoped)
+            visible_keys = {_page_stable_key(row) for row in scoped}
+            expected_keys = {
+                entry["stable"] for entry in entries if entry["database_key"] == database_key
+            }
+            if not expected_keys.issubset(visible_keys):
+                raise UncertainWriteError(
+                    f"{database_key} 저장 후 현재 여행에 표시되는 행을 확인하지 못했습니다."
+                )
+    result = {
+        "status": "complete",
+        "trip_id": trip_id,
+        "created": created,
+        "updated": updated,
+        "rows": visible_rows,
+    }
+    result.update(_performance_result(client))
+    return result
+
+
+@contextmanager
+def _null_context() -> Any:
+    yield
 
 
 def ensure_idempotency_schema(mapping: Dict[str, Any], path: Path, client: Any) -> None:
