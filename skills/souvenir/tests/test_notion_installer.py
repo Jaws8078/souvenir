@@ -166,6 +166,60 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(shopping_props["수량"]["type"], "number")
         self.assertIn("정보 상태", shopping_props)
 
+    def test_confirmed_shopping_rows_are_created_and_re_read(self):
+        self.install()
+        result = self.scaffold(traveler_count=2)
+        mapping = ni.read_json(self.path)
+        rows = [{
+            "품목": "유자 킷캣",
+            "담당 여행자": "동행자 1",
+            "구매 장소": "하카타역 돈키호테",
+            "수량": 3,
+            "예상 금액": 1200,
+            "통화": "JPY",
+            "상태": "구매 예정",
+            "정보 상태": "사용자 확인 완료",
+            "링크·메모": "출처: https://example.com/item",
+        }]
+        saved = ni.save_shopping_rows(self.manifest, self.client, self.path,
+                                      result["trip_id"], rows, confirmed=True)
+        self.assertEqual(saved["status"], "complete")
+        self.assertEqual(len(saved["created"]), 1)
+        self.assertEqual(len(saved["rows"]), 1)
+        shopping_db = mapping["databases"]["shopping"]
+        payload = next(payload for kind, parent, payload, row_id in self.client.created
+                       if kind == "row" and parent == shopping_db and row_id == saved["created"][0])
+        self.assertEqual(payload["수량"]["number"], 3)
+        self.assertEqual(payload["정보 상태"]["select"]["name"], "사용자 확인 완료")
+        self.assertEqual(payload["여행 키"]["rich_text"][0]["text"]["content"], result["trip_id"])
+
+    def test_unconfirmed_or_incomplete_shopping_rows_never_write(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        before = len(self.client.created)
+        with self.assertRaisesRegex(ni.InstallerError, "사용자 확인"):
+            ni.save_shopping_rows(self.manifest, self.client, self.path,
+                                  result["trip_id"], [{"품목": "유자 킷캣"}], confirmed=False)
+        self.assertEqual(len(self.client.created), before)
+        with self.assertRaisesRegex(ni.InstallerError, "확인이 필요한"):
+            ni.save_shopping_rows(self.manifest, self.client, self.path,
+                                  result["trip_id"], [{"품목": "유자 킷캣", "수량": 1}], confirmed=True)
+        self.assertEqual(len(self.client.created), before)
+
+    def test_repeating_confirmed_shopping_save_updates_same_row(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        row = {"품목": "유자 킷캣", "담당 여행자": "동행자 1", "구매 장소": "돈키호테",
+               "수량": 1, "예상 금액": 500, "통화": "JPY"}
+        first = ni.save_shopping_rows(self.manifest, self.client, self.path,
+                                      result["trip_id"], [row], confirmed=True)
+        row["수량"] = 2
+        second = ni.save_shopping_rows(self.manifest, self.client, self.path,
+                                       result["trip_id"], [row], confirmed=True)
+        self.assertEqual(first["created"], second["updated"])
+        self.assertEqual(second["created"], [])
+        self.assertEqual(len(second["rows"]), 1)
+
     def test_old_install_is_migrated_with_idempotency_property(self):
         self.install()
         mapping = ni.read_json(self.path)

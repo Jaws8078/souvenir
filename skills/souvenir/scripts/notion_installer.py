@@ -816,6 +816,12 @@ def verify_created(client: Any, result: Any) -> None:
         raise UncertainWriteError("생성된 페이지를 다시 확인하지 못했습니다. 저장 여부를 확인하세요.")
 
 
+def verify_updated(result: Any, page_id: str) -> None:
+    """Validate the already-reread response returned by an update call."""
+    if not isinstance(result, dict) or result.get("id") != page_id:
+        raise UncertainWriteError("수정된 쇼핑 행을 다시 확인하지 못했습니다. 저장 여부를 확인하세요.")
+
+
 def find_existing_row(client: Any, database_id: str, key: str) -> Optional[str]:
     """Find exactly one row with a stable key; never create blindly on ambiguity."""
     query = getattr(client, "query_database", None)
@@ -854,6 +860,175 @@ def ensure_database_row(mapping: Dict[str, Any], path: Path, client: Any,
         verify=lambda created: verify_created(client, created),
         idempotency_key=key,
     )
+
+
+def _shopping_row_properties(manifest: Dict[str, Any], row: Dict[str, Any],
+                             trip_id: str, operation_key: str,
+                             include_empty: bool = False) -> Dict[str, Any]:
+    """Encode one confirmed shopping row using the installed DB schema.
+
+    Only fields present in the manifest are written.  This keeps the writer
+    compatible with older copied templates while still preserving the source
+    URL in the existing ``링크·메모`` field.
+    """
+    database = database_by_key(manifest, "shopping")
+    specs = {item["name"]: item for item in database.get("properties", [])
+             if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    item = str(row.get("품목", "")).strip()
+    if not item:
+        raise InstallerError("쇼핑 행에 품목명이 필요합니다.")
+    properties: Dict[str, Any] = {database["title_property"]: {"title": title_payload(item)}}
+    values = dict(row)
+    values["여행 키"] = trip_id
+    # The write endpoint is only called after the user has approved the
+    # candidate, so make that state explicit in Notion.
+    values["정보 상태"] = "사용자 확인 완료"
+    values.pop("품목", None)
+    for name, value in values.items():
+        if name not in specs or name in {database["title_property"], "추가 확인", "저장 가능", "확인 상태"}:
+            continue
+        if value in (None, "") and not include_empty:
+            continue
+        encoded = property_value(specs[name], value)
+        if encoded is not None:
+            properties[name] = encoded
+    properties[IDEMPOTENCY_PROPERTY] = {"rich_text": rich_text(operation_key)}
+    return properties
+
+
+def _shopping_row_key(trip_id: str, row: Dict[str, Any]) -> str:
+    """Build a stable key that is safe to retry and scoped to one trip."""
+    def value_text(value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    return stable_key(
+        "shopping",
+        trip_id,
+        value_text(row.get("담당 여행자")) or "공용",
+        value_text(row.get("품목")),
+        value_text(row.get("구매 장소")),
+    )
+
+
+def _shopping_scope_filter(trip_id: str) -> Dict[str, Any]:
+    return {"property": "여행 키", "rich_text": {"equals": trip_id}}
+
+
+def _shopping_rows_for_trip(client: Any, database_id: str, trip_id: str) -> List[Dict[str, Any]]:
+    def value_text(value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    rows = client.query_database(database_id, {"filter": _shopping_scope_filter(trip_id)})
+    allowed = {trip_id}
+    return [row for row in rows
+            if value_text(_plain_property_text(row.get("properties", {}), "여행 키")) in allowed]
+
+
+def save_shopping_rows(manifest: Dict[str, Any], client: NotionClient,
+                       mapping_path: Path, trip_id: str,
+                       rows: Sequence[Dict[str, Any]],
+                       confirmed: bool = False) -> Dict[str, Any]:
+    """Create or update approved, trip-scoped shopping rows in Notion.
+
+    This is the write half of the shopping wizard.  The host may research an
+    item with web/image tools, show the candidate and source to the user, then
+    call this function with ``confirmed=True``.  It refuses name-only or
+    unconfirmed rows and rereads the filtered database after every batch.
+    """
+    if not trip_id:
+        raise InstallerError("쇼핑을 저장하려면 여행 페이지 ID가 필요합니다.")
+    if not rows:
+        return {"status": "skipped", "created": [], "updated": [], "rows": []}
+    if not confirmed:
+        raise InstallerError("쇼핑 후보를 저장하기 전에 사용자 확인이 필요합니다.")
+    mapping = read_json(mapping_path)
+    check_pending(mapping)
+    check_manifest_version(mapping, manifest)
+    if mapping.get("status") != "complete":
+        raise InstallerError("먼저 Souvenir 설치를 완료해야 쇼핑 목록을 저장할 수 있습니다.")
+    database_id = (mapping.get("databases") or {}).get("shopping")
+    if not database_id:
+        raise InstallerError("설치 기록에 쇼핑 데이터베이스 매핑이 없습니다.")
+
+    normalized: List[Dict[str, Any]] = []
+    def value_text(value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    for raw in rows:
+        if not isinstance(raw, dict):
+            raise InstallerError("쇼핑 행은 객체여야 합니다.")
+        row = dict(raw)
+        missing = [field for field in ("구매 장소", "수량", "예상 금액")
+                   if row.get(field) in (None, "")]
+        if missing:
+            raise InstallerError(f"{row.get('품목') or '쇼핑 품목'}에 확인이 필요한 값이 있습니다: {', '.join(missing)}")
+        if not value_text(row.get("품목")):
+            raise InstallerError("쇼핑 행에 품목명이 필요합니다.")
+        normalized.append(row)
+
+    workspace_key = str(mapping.get("parent_page_id") or "unknown")
+    owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
+    # Ensure the shared operation log exists before taking the advisory lease.
+    with operation_locks(mapping_path, workspace_key, "shopping-save"):
+        mapping = read_json(mapping_path)
+        ensure_operation_log(mapping, mapping_path, client)
+        trip_key = value_text(trip_id)
+        with distributed_lease(workspace_key, trip_key, "shopping-save", owner, database_id):
+            with operation_lease(mapping, mapping_path, client, trip_key, "shopping-save", owner, database_id):
+                created: List[str] = []
+                updated: List[str] = []
+                database = database_by_key(manifest, "shopping")
+                relation_cache: Dict[str, bool] = {}
+                for row in normalized:
+                    key = _shopping_row_key(trip_id, row)
+                    properties = _shopping_row_properties(manifest, row, trip_id, key)
+                    existing = find_existing_row(client, database_id, key)
+                    if existing:
+                        current = client.get_page(existing)
+                        expected = current.get("last_edited_time") if isinstance(current, dict) else None
+                        recorded_write(
+                            mapping,
+                            mapping_path,
+                            f"shopping:update:{key}",
+                            lambda: client.update_page_properties(existing, properties, expected),
+                            lambda _result: None,
+                            verify=lambda result: verify_updated(result, existing),
+                            idempotency_key=key,
+                        )
+                        _link_row_to_trip(client, existing, database_id, trip_id, relation_cache)
+                        updated.append(existing)
+                        continue
+
+                    holder: Dict[str, Any] = {}
+                    recorded_write(
+                        mapping,
+                        mapping_path,
+                        f"shopping:{key}",
+                        lambda: client.create_database_page(database_id, properties),
+                        lambda result: holder.update({"id": result.get("id")}),
+                        verify=lambda result: verify_created(client, result),
+                        idempotency_key=key,
+                    )
+                    created_id = holder.get("id")
+                    if not created_id:
+                        raise UncertainWriteError("쇼핑 행 생성 후 페이지 ID를 확인하지 못했습니다.")
+                    _link_row_to_trip(client, created_id, database_id, trip_id, relation_cache)
+                    created.append(created_id)
+                visible = _shopping_rows_for_trip(client, database_id, trip_id)
+                visible_keys = {
+                    value_text(_plain_property_text(row.get("properties", {}), IDEMPOTENCY_PROPERTY))
+                    for row in visible
+                }
+                expected_keys = {_shopping_row_key(trip_id, row) for row in normalized}
+                if not expected_keys.issubset(visible_keys):
+                    raise UncertainWriteError("쇼핑 저장 후 현재 여행의 실제 행을 다시 확인하지 못했습니다.")
+                return {
+                    "status": "complete",
+                    "trip_id": trip_id,
+                    "created": created,
+                    "updated": updated,
+                    "rows": visible,
+                }
 
 
 def _has_trip_relation(client: Any, database_id: str) -> bool:
@@ -1712,7 +1887,7 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir portable Notion template installer")
-    parser.add_argument("command", choices=["validate", "plan", "install", "scaffold"])
+    parser.add_argument("command", choices=["validate", "plan", "install", "scaffold", "shopping-save"])
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--mapping", type=Path, default=DEFAULT_MAPPING)
     parser.add_argument("--parent-page", help="대상 워크스페이스에서 생성할 상위 Notion 페이지 ID 또는 URL")
@@ -1726,6 +1901,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--travelers", type=int, default=0, help="scaffold 여행 인원. 0이면 미정")
     parser.add_argument("--currency", default="미정", help="scaffold 기준 통화: KRW·JPY·USD·EUR·미정")
     parser.add_argument("--trip-name", help="scaffold 여행 페이지 제목")
+    parser.add_argument("--trip-id", help="shopping-save 대상 여행 페이지 ID")
+    parser.add_argument("--shopping-input", type=Path, help="shopping-save 승인된 쇼핑 행 JSON")
+    parser.add_argument("--confirm", action="store_true", help="shopping-save 사용자 확인 완료")
     return parser
 
 
@@ -1748,6 +1926,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not token:
             raise InstallerError(f"{args.command}에는 NOTION_TOKEN 환경 변수 또는 --token이 필요합니다. 토큰을 채팅에 붙여넣지 마세요.")
         client = NotionClient(token, args.api_version)
+        if args.command == "shopping-save":
+            if not args.trip_id:
+                raise InstallerError("shopping-save에는 --trip-id가 필요합니다.")
+            if not args.shopping_input:
+                raise InstallerError("shopping-save에는 --shopping-input JSON 파일이 필요합니다.")
+            if not args.confirm:
+                raise InstallerError("쇼핑 후보를 저장하기 전에 --confirm 승인이 필요합니다.")
+            try:
+                loaded = json.loads(args.shopping_input.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                raise InstallerError(f"쇼핑 입력 JSON을 읽지 못했습니다: {args.shopping_input}") from exc
+            rows = loaded.get("rows", loaded.get("쇼핑", loaded)) if isinstance(loaded, dict) else loaded
+            if isinstance(rows, dict):
+                rows = [rows]
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise InstallerError("쇼핑 입력 JSON은 행 객체 배열이어야 합니다.")
+            result = save_shopping_rows(manifest, client, args.mapping, args.trip_id, rows, confirmed=True)
+            print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
+            return 0
         if args.command == "scaffold":
             if not args.destination:
                 raise InstallerError("scaffold에는 --destination이 필요합니다.")

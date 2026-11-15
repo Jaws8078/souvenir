@@ -178,6 +178,35 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(quantity_first[0]["수량"], 3)
         self.assertEqual(quantity_first[0]["구매 장소"], "하카타역 돈키호테")
 
+    def test_shopping_research_never_guesses_name_only_values(self):
+        packet = engine.prepare_shopping_research("유자 킷캣", "후쿠오카")
+        self.assertEqual(packet["검색어"], "후쿠오카 유자 킷캣")
+        self.assertEqual(packet["상태"], "검색 필요")
+        self.assertFalse(packet["저장 가능"])
+        self.assertEqual(set(packet["추가 확인"]), {"구매 장소", "수량", "예상 금액"})
+
+    def test_shopping_research_candidates_need_confirmation(self):
+        packet = engine.prepare_shopping_research(
+            "유자 킷캣",
+            "후쿠오카",
+            [{"price": "JPY 1,200", "quantity": "3개", "store": "하카타역 돈키호테",
+              "source_url": "https://example.com/item"}],
+            "JPY",
+        )
+        self.assertEqual(packet["상태"], "확인 대기")
+        self.assertTrue(packet["저장 가능"])
+        self.assertEqual(packet["후보"][0]["예상 금액"], 1200)
+        self.assertIn("출처: https://example.com/item", packet["후보"][0]["링크·메모"])
+
+    def test_shopping_confirmation_requires_explicit_approval(self):
+        candidate = {"price": 1200, "quantity": 3, "store": "하카타역 돈키호테", "currency": "JPY"}
+        pending = engine.confirm_shopping_candidate("유자 킷캣", candidate, "유성", "JPY")
+        self.assertFalse(pending["저장 가능"])
+        self.assertEqual(pending["확인 상태"], "사용자 확인 대기")
+        approved = engine.confirm_shopping_candidate("유자 킷캣", candidate, "유성", "JPY", True)
+        self.assertTrue(approved["저장 가능"])
+        self.assertEqual(approved["정보 상태"], "사용자 확인 완료")
+
     def test_refresh_view_returns_today_next_deadlines_and_budget(self):
         view = engine.refresh_view(
             {"기준 통화": "JPY"},

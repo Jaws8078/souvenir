@@ -9,6 +9,7 @@
 - `organize`: `일정명 | 시작-종료 | 장소 | 메모` 형식의 짧은 입력을 일차·날짜·시간 필드로 분리한다. `3박 4일`처럼 실제 날짜가 없으면 일차만 만든다.
 - `import`: 표준 라이브러리만 사용해 UTF-8 CSV, JSON, iCalendar(`.ics`), 텍스트 장소 목록과 지도 링크를 읽는다. Google Maps 공유 단축 링크(`maps.app.goo.gl`, `goo.gl/maps`)는 리디렉션을 따라 최종 주소에서 장소명을 추출한다. 링크가 만료·차단돼 해석되지 않으면 호스트명을 장소명으로 저장하지 않고 `확인 필요` 상태를 반환한다. PDF·이미지 OCR은 별도 승인과 도구가 필요한 후속 범위다.
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약을 읽기 전용 화면용 JSON으로 만든다. 기본 계산은 Notion 페이지를 수정하지 않는다.
+- `shopping`: 품목명만 받은 요청을 조사 후보 확인 패킷으로 만들거나, 외부 검색 결과 JSON에서 선택한 후보를 `사용자 확인 완료` 상태의 저장 준비 행으로 정규화한다. 검색 자체는 호스트의 웹·이미지 도구가 수행하고, 엔진은 값을 추정하지 않는다.
 
 ## 오프라인 사용
 
@@ -39,6 +40,15 @@ python3 skills/souvenir/scripts/trip_engine.py organize \
 python3 skills/souvenir/scripts/trip_engine.py import --input expenses.csv --kind auto --pretty
 python3 skills/souvenir/scripts/trip_engine.py import --input trip.ics --kind auto --pretty
 python3 skills/souvenir/scripts/trip_engine.py import --text 'https://maps.google.com/?query=Ohori' --kind link --pretty
+
+# 품목명만 받은 경우: 검색 후보를 저장하지 않고 확인용으로만 만든다.
+python3 skills/souvenir/scripts/run_souvenir.py shopping \
+  --item-name '유자 킷캣' --destination 후쿠오카 --pretty
+
+# 호스트가 조사한 후보 JSON을 보여준 뒤, 사용자가 고른 후보만 승인 상태로 만든다.
+python3 skills/souvenir/scripts/run_souvenir.py shopping \
+  --item-name '유자 킷캣' --candidate-input shopping-candidates.json \
+  --candidate-index 0 --traveler '동행자 1' --base-currency JPY --confirm --pretty
 ```
 
 단축 링크도 같은 방식으로 가져올 수 있다. 네트워크에서 최종 주소를 확인할 수 없을 때는 저장하지 않고 확인 요청용 결과를 만든다.
@@ -60,5 +70,13 @@ NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/trip_engine.py refresh
 ```
 
 이 경로는 현재 일정·예약·숙소·장소·지갑·지출 DB를 읽어 결과를 만드는 단계다. 자동 수정은 하지 않으며, 스킬이 결과를 사용자에게 보여주고 `반영`을 받은 뒤 필요한 행만 Notion 도구로 수정한다. 토큰·쿠키·비밀번호는 JSON 스냅샷이나 매핑 파일에 저장하지 않는다.
+
+fallback 설치기를 쓰는 환경에서는 승인된 행 JSON만 Notion에 저장할 수 있다. 후보를 먼저 보여주고 사용자 승인을 받은 뒤 실행한다.
+
+```bash
+NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py shopping-save \
+  --mapping .souvenir-install.json --trip-id "<여행 페이지 ID>" \
+  --shopping-input shopping-confirmed.json --confirm --pretty
+```
 
 로컬 실행기는 사용자의 요청이 있을 때만 실행되며 백그라운드에서 계속 돌지 않는다. 로컬 실행기가 없는 ChatGPT 웹·모바일 환경에서는 Python 엔진을 자동 호출할 수 없고, Notion 플러그인과 채팅 안내만 사용할 수 있다. 별도 MCP 서버를 설치해야 하는 구조는 아니다.

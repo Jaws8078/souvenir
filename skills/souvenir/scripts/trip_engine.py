@@ -27,6 +27,7 @@ TIME_RANGE_RE = re.compile(r"(?P<start>\d{1,2}:\d{2})\s*[-~–]\s*(?P<end>\d{1,2
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 URL_RE = re.compile(r"https?://[^\s|]+", re.I)
 SHORT_MAP_HOSTS = {"maps.app.goo.gl", "goo.gl"}
+SHOPPING_REQUIRED_FIELDS = ("구매 장소", "수량", "예상 금액")
 
 ALIASES = {
     "title": ("title", "이름", "일정", "예약", "숙소", "내역", "장소", "항공편", "자료", "지갑", "여행자", "분담", "송금", "할 일", "준비물", "예산 항목", "서비스", "이동 구간", "결정", "날씨 확인", "검사", "품목"),
@@ -320,13 +321,157 @@ def parse_shopping_lines(content: str) -> List[Dict[str, Any]]:
             if len(fields) > 7 and shopping_number(fields[7]) is not None:
                 record["수량"] = compact_number(fields[7])
 
-        required = ("구매 장소", "수량", "예상 금액")
+        required = SHOPPING_REQUIRED_FIELDS
         missing = [name for name in required if name not in record or record[name] in (None, "")]
         record["정보 상태"] = "확인 필요" if missing else "입력 완료"
         if missing:
             record["추가 확인"] = missing
         records.append(record)
     return records
+
+
+def _candidate_value(candidate: Dict[str, Any], names: Sequence[str]) -> Any:
+    """Read the first non-empty value from a web/search candidate."""
+    for name in names:
+        value_ = candidate.get(name)
+        if value_ not in (None, "", []):
+            return value_
+    return None
+
+
+def normalize_shopping_candidate(candidate: Dict[str, Any], item_name: str = "",
+                                 default_currency: str = "미정") -> Dict[str, Any]:
+    """Normalize an externally researched shopping candidate.
+
+    The search layer is intentionally supplied by the host (web search, an
+    image reader, or a user-provided link).  This function only converts the
+    untrusted result into a small, auditable row.  It never invents a missing
+    price, quantity, or store and never treats a candidate as approved.
+    """
+    if not isinstance(candidate, dict):
+        raise ValueError("쇼핑 후보는 객체여야 합니다.")
+    item = text(_candidate_value(candidate, ("품목", "품목명", "name", "item", "title"))) or text(item_name)
+    if not item:
+        raise ValueError("쇼핑 후보에 품목명이 필요합니다.")
+
+    result: Dict[str, Any] = {"품목": item}
+    traveler = _candidate_value(candidate, ("담당 여행자", "담당자", "traveler", "person"))
+    place = _candidate_value(candidate, ("구매 장소", "판매처", "매장", "shopping_place", "store", "place"))
+    quantity = _candidate_value(candidate, ("수량", "quantity", "qty"))
+    amount = _candidate_value(candidate, ("예상 금액", "가격", "price", "amount", "total_price"))
+    currency = _candidate_value(candidate, ("통화", "currency")) or default_currency or "미정"
+    tag = _candidate_value(candidate, ("태그", "tag", "category"))
+    payment = _candidate_value(candidate, ("결제 수단", "payment_method", "payment"))
+    status = _candidate_value(candidate, ("상태", "status")) or "구매 예정"
+    source = _candidate_value(candidate, ("출처", "source", "source_url", "url", "link"))
+    image_url = _candidate_value(candidate, ("사진 URL", "사진", "image_url", "image", "thumbnail"))
+    note = _candidate_value(candidate, ("링크·메모", "메모", "note", "notes"))
+
+    if traveler is not None:
+        result["담당 여행자"] = text(traveler)
+    if place is not None:
+        result["구매 장소"] = text(place)
+    def candidate_number(raw: Any) -> Optional[float]:
+        parsed = number(raw)
+        if parsed is not None:
+            return parsed
+        match = re.search(r"-?\d[\d,]*(?:\.\d+)?", text(raw))
+        return number(match.group(0)) if match else None
+
+    if quantity is not None:
+        parsed_quantity = candidate_number(quantity)
+        result["수량"] = int(parsed_quantity) if parsed_quantity is not None and parsed_quantity.is_integer() else (parsed_quantity if parsed_quantity is not None else text(quantity))
+    if amount is not None:
+        parsed_amount = candidate_number(amount)
+        result["예상 금액"] = int(parsed_amount) if parsed_amount is not None and parsed_amount.is_integer() else (parsed_amount if parsed_amount is not None else text(amount))
+    result["통화"] = text(currency)
+    if tag is not None:
+        result["태그"] = tag if isinstance(tag, list) else [text(tag)]
+    if payment is not None:
+        result["결제 수단"] = text(payment)
+    if image_url:
+        result["사진 URL"] = text(image_url)
+    if status in {"아이디어", "구매 예정", "구매 완료", "보류", "제외"}:
+        result["상태"] = status
+    else:
+        result["상태"] = "구매 예정"
+
+    notes: List[str] = []
+    if note:
+        notes.append(text(note))
+    if source:
+        source_text = text(source)
+        if source_text not in notes:
+            notes.append(f"출처: {source_text}")
+    if notes:
+        result["링크·메모"] = "\n".join(notes)
+    return result
+
+
+def prepare_shopping_research(item_name: str, destination: str = "",
+                              candidates: Sequence[Dict[str, Any]] = (),
+                              default_currency: str = "미정") -> Dict[str, Any]:
+    """Build a confirmation packet for a name-only shopping request.
+
+    A host can use ``검색어`` with its web/image tools, pass the results back
+    as ``candidates``, and show this packet before any Notion write.  The
+    packet deliberately has no write side effect and marks every candidate as
+    awaiting user approval.
+    """
+    item = text(item_name)
+    if not item:
+        raise ValueError("쇼핑 품목명을 입력하세요.")
+    query = " ".join(part for part in (text(destination), item) if part)
+    normalized: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        row = normalize_shopping_candidate(candidate, item, default_currency)
+        missing = [field for field in SHOPPING_REQUIRED_FIELDS
+                   if row.get(field) in (None, "")]
+        row["정보 상태"] = "확인 필요" if missing else "확인 대기"
+        row["추가 확인"] = missing
+        row["저장 가능"] = not missing
+        normalized.append(row)
+    missing = list(SHOPPING_REQUIRED_FIELDS)
+    if normalized:
+        complete = [row for row in normalized if row.get("저장 가능")]
+        if complete:
+            missing = []
+        else:
+            missing = list(dict.fromkeys(field for row in normalized for field in row.get("추가 확인", [])))
+    return {
+        "품목": item,
+        "검색어": query,
+        "후보": normalized,
+        "상태": "확인 대기" if normalized else "검색 필요",
+        "추가 확인": missing,
+        "확인 질문": "이 후보 정보로 저장할까요?" if normalized else "검색 결과를 확인한 뒤 후보를 보여드릴까요?",
+        "저장 가능": bool(normalized) and any(row.get("저장 가능") for row in normalized),
+    }
+
+
+def confirm_shopping_candidate(item_name: str, candidate: Dict[str, Any],
+                               traveler: str = "", default_currency: str = "미정",
+                               confirmed: bool = False) -> Dict[str, Any]:
+    """Turn one researched candidate into a save-ready, user-confirmed row."""
+    row = normalize_shopping_candidate(candidate, item_name, default_currency)
+    if traveler and not row.get("담당 여행자"):
+        row["담당 여행자"] = text(traveler)
+    missing = [field for field in SHOPPING_REQUIRED_FIELDS
+               if row.get(field) in (None, "")]
+    row["추가 확인"] = missing
+    if missing:
+        row["정보 상태"] = "확인 필요"
+        row["저장 가능"] = False
+        row["확인 상태"] = "보완 필요"
+    elif not confirmed:
+        row["정보 상태"] = "확인 대기"
+        row["저장 가능"] = False
+        row["확인 상태"] = "사용자 확인 대기"
+    else:
+        row["정보 상태"] = "사용자 확인 완료"
+        row["저장 가능"] = True
+        row["확인 상태"] = "승인됨"
+    return row
 
 
 def _clean_map_label(value_: Any) -> str:
@@ -814,10 +959,16 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir Python travel engine")
-    parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh"])
+    parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh", "shopping"])
     parser.add_argument("--input", type=Path, help="JSON 스냅샷 또는 가져올 파일")
     parser.add_argument("--kind", choices=["auto", "itinerary", "place", "shopping", "link", "csv", "json", "ics", "expense"], default="auto")
     parser.add_argument("--text", help="organize/import에서 직접 받을 텍스트")
+    parser.add_argument("--item-name", help="shopping 조사 대상 품목명")
+    parser.add_argument("--candidate-input", type=Path, help="shopping 외부 검색 후보 JSON")
+    parser.add_argument("--candidate-index", type=int, help="확인할 후보 번호(0부터 시작)")
+    parser.add_argument("--traveler", help="확인된 쇼핑 행의 담당 여행자")
+    parser.add_argument("--confirm", action="store_true", help="선택한 후보를 사용자 확인 완료로 표시")
+    parser.add_argument("--destination", help="shopping 조사 검색어에 넣을 목적지")
     parser.add_argument("--start-date", help="일정 텍스트의 출발일 YYYY-MM-DD")
     parser.add_argument("--duration-days", type=int, help="일정 텍스트의 여행 일수")
     parser.add_argument("--mapping", type=Path, default=Path(".souvenir-install.json"))
@@ -863,7 +1014,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         rates = parse_rates(args.rate)
-        if args.command in {"organize", "import"}:
+        if args.command == "shopping":
+            item_name = args.item_name or args.text
+            if not item_name:
+                raise ValueError("shopping에는 --item-name 또는 --text가 필요합니다.")
+            candidates: List[Dict[str, Any]] = []
+            if args.candidate_input:
+                raw_text = args.candidate_input.read_text(encoding="utf-8-sig")
+                loaded = json.loads(raw_text)
+                raw_candidates = loaded
+                if isinstance(loaded, dict):
+                    raw_candidates = loaded.get("candidates", loaded.get("후보", loaded))
+                if isinstance(raw_candidates, list):
+                    candidates = [item for item in raw_candidates if isinstance(item, dict)]
+                elif isinstance(raw_candidates, dict):
+                    candidates = [raw_candidates]
+            if args.confirm:
+                if args.candidate_index is None:
+                    raise ValueError("확인 저장에는 --candidate-index가 필요합니다.")
+                if args.candidate_index < 0 or args.candidate_index >= len(candidates):
+                    raise ValueError("candidate-index가 후보 범위를 벗어났습니다.")
+                result = confirm_shopping_candidate(
+                    item_name,
+                    candidates[args.candidate_index],
+                    args.traveler or "",
+                    args.base_currency or "미정",
+                    True,
+                )
+                if not result.get("저장 가능"):
+                    raise ValueError("후보에 구매 장소·수량·예상 금액이 모두 필요합니다.")
+            else:
+                result = prepare_shopping_research(
+                    item_name,
+                    args.destination or "",
+                    candidates,
+                    args.base_currency or "미정",
+                )
+        elif args.command in {"organize", "import"}:
             if args.text is not None:
                 content = args.text
                 if args.command == "organize" or args.kind in {"auto", "itinerary"}:
