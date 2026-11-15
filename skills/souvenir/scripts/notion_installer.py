@@ -1544,7 +1544,10 @@ def save_trip_fields(manifest: Dict[str, Any], client: NotionClient,
     properties: Dict[str, Any] = {}
     for name, value in row.items():
         canonical = aliases.get(name, name)
-        if canonical not in specs or canonical in {"여행 키", "자동 제외"}:
+        # ``자동 제외`` is a user-controlled progress override, not an
+        # internal key.  It must be writable so the Notion summary can be
+        # corrected when the automatic status is incomplete or stale.
+        if canonical not in specs or canonical == "여행 키":
             continue
         if value in (None, ""):
             continue

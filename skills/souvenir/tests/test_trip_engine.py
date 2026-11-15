@@ -122,6 +122,102 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(report["unknown_currency"][0]["currency"], "JPY")
         self.assertEqual(len(report["unknown_currency"]), 2)
 
+    def test_budget_attaches_compact_expense_to_the_only_wallet(self):
+        report = engine.calculate_budget(
+            [{"지갑": "공용", "통화": "JPY", "준비 금액": 1000}],
+            [{"내역": "커피", "금액": 100, "통화": "JPY", "상태": "완료"}],
+            base_currency="JPY",
+        )
+        self.assertEqual(report["spent"], 100)
+        self.assertEqual(report["wallets"][0]["spent"], 100)
+        self.assertEqual(report["wallets"][0]["remaining"], 900)
+
+    def test_budget_does_not_count_an_unlinked_expense_with_multiple_wallets(self):
+        report = engine.calculate_budget(
+            [{"지갑": "현금", "통화": "JPY", "준비 금액": 1000},
+             {"지갑": "카드", "통화": "JPY", "준비 금액": 1000}],
+            [{"내역": "커피", "금액": 100, "통화": "JPY", "상태": "완료"}],
+            base_currency="JPY",
+        )
+        self.assertEqual(report["spent"], 0)
+        self.assertEqual(report["remaining"], 2000)
+        self.assertEqual(report["unknown_currency"][0]["reason"], "wallet_required")
+
+    def test_budget_resolves_notion_relation_wallet_page_id(self):
+        wallet_page = {
+            "id": "wallet-page-id",
+            "properties": {
+                "지갑": {"type": "title", "title": [{"plain_text": "공용"}]},
+                "통화": {"type": "select", "select": {"name": "JPY"}},
+                "준비 금액": {"type": "number", "number": 1000},
+            },
+        }
+        expense_page = {
+            "id": "expense-page-id",
+            "properties": {
+                "내역": {"type": "title", "title": [{"plain_text": "커피"}]},
+                "금액": {"type": "number", "number": 100},
+                "거래 상태": {"type": "select", "select": {"name": "완료"}},
+                "지갑": {"type": "relation", "relation": [{"id": "wallet-page-id"}]},
+            },
+        }
+        report = engine.calculate_budget(
+            [engine.notion_page_record(wallet_page)],
+            [engine.notion_page_record(expense_page)],
+            base_currency="JPY",
+        )
+        self.assertEqual(report["spent"], 100)
+        self.assertEqual(report["wallets"][0]["spent"], 100)
+        self.assertEqual(report["wallets"][0]["remaining"], 900)
+        self.assertEqual(report["unknown_currency"], [])
+
+    def test_progress_combines_automatic_statuses_and_exclusions(self):
+        report = engine.calculate_progress(
+            itinerary=[
+                {"일정": "계획", "상태": "계획"},
+                {"일정": "완료", "상태": "완료"},
+                {"일정": "취소", "상태": "취소"},
+            ],
+            reservations=[{"예약": "항공", "예약 상태": "확정"}, {"예약": "환불", "예약 상태": "환불"}],
+            tasks=[{"할 일": "여권", "상태": "완료"}],
+            packing=[{"준비물": "충전기", "상태": "준비 완료"}],
+        )
+        self.assertEqual(report["completed"], 4)
+        self.assertEqual(report["target"], 5)
+        self.assertEqual(report["percent"], 80.0)
+        self.assertEqual(report["categories"]["reservation"]["target"], 1)
+
+    def test_progress_manual_complete_and_auto_exclude_are_reflected(self):
+        report = engine.calculate_progress(
+            itinerary=[
+                {"일정": "자동 완료지만 검토", "상태": "완료", "자동 제외": True},
+                {"일정": "직접 완료", "상태": "계획", "수동 완료": True},
+            ],
+            tasks=[{"할 일": "자동 대기", "상태": "시작 전"}],
+        )
+        self.assertEqual(report["completed"], 1)
+        self.assertEqual(report["target"], 3)
+        self.assertEqual(report["categories"]["itinerary"]["mode"], "수동")
+
+    def test_progress_global_manual_controls_override_automatic_status(self):
+        report = engine.calculate_progress(
+            itinerary=[{"일정": "공항", "상태": "계획"}],
+            reservations=[{"예약": "숙소", "예약 상태": "대기"}],
+            trip={"진행도 수동 완료": True},
+        )
+        self.assertEqual(report["completed"], 2)
+        self.assertEqual(report["percent"], 100.0)
+
+    def test_progress_empty_and_disabled_categories_are_not_100_percent(self):
+        report = engine.calculate_progress(
+            itinerary=[],
+            tasks=[{"할 일": "완료", "상태": "완료"}],
+            overrides={"task": {"사용 여부": False}},
+        )
+        self.assertEqual(report["target"], 0)
+        self.assertEqual(report["percent"], 0.0)
+        self.assertEqual(report["status"], "등록 전")
+
     def test_settlement_creates_transfers(self):
         report = engine.calculate_budget(
             [], [],
@@ -294,6 +390,8 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(view["deadline_alerts"][0]["예약"], "티켓")
         self.assertEqual(view["shopping"]["planned"], 1)
         self.assertEqual(view["shopping"]["purchased"], 1)
+        self.assertEqual(view["progress"]["target"], 3)
+        self.assertEqual(view["progress"]["percent"], 0.0)
 
     def test_notion_page_record_flattens_properties(self):
         page = {"id": "page-1", "properties": {

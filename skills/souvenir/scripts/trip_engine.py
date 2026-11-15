@@ -358,6 +358,249 @@ ALIASES = {
 }
 
 
+# 진행도 집계는 Notion 수식/롤업과 로컬 엔진이 같은 의미를 사용해야 한다.
+# 복제본마다 일부 속성명이 달라질 수 있으므로 표시 이름과 내부 이름을
+# 함께 허용하되, 자동 결과 속성(수식/롤업)은 입력값으로 취급하지 않는다.
+PROGRESS_CATEGORIES: Dict[str, Dict[str, Any]] = {
+    "itinerary": {
+        "label": "일정",
+        "done": {"완료", "계획 완료", "done", "complete", "completed"},
+        "excluded": {"취소", "건너뜀", "제외", "cancelled", "skipped", "excluded"},
+    },
+    "reservation": {
+        "label": "예약",
+        "done": {"완료", "확정", "예약 완료", "confirmed", "complete", "completed"},
+        "excluded": {"취소", "환불", "환불 대기", "제외", "cancelled", "refunded", "excluded"},
+    },
+    "task": {
+        "label": "할 일",
+        "done": {"완료", "done", "complete", "completed"},
+        "excluded": {"제외", "취소", "건너뜀", "cancelled", "skipped", "excluded"},
+    },
+    "packing": {
+        "label": "준비물",
+        "done": {"준비 완료", "완료", "done", "complete", "completed"},
+        "excluded": {"제외", "취소", "건너뜀", "cancelled", "skipped", "excluded"},
+    },
+    "shopping": {
+        "label": "쇼핑",
+        "done": {"구매 완료", "완료", "done", "complete", "completed"},
+        "excluded": {"제외", "취소", "cancelled", "excluded"},
+    },
+}
+
+PROGRESS_MANUAL_ALIASES = (
+    "진행도 수동 완료", "직접 완료", "수동 완료", "완료 체크", "manual_complete",
+)
+PROGRESS_AUTO_EXCLUDE_ALIASES = (
+    "자동 제외", "진행도 자동 제외", "자동 집계 제외", "집계 제외", "auto_exclude",
+)
+PROGRESS_ENABLED_ALIASES = (
+    "사용", "사용 여부", "집계 포함", "진행도 포함", "활성", "계획 포함", "enabled",
+)
+
+
+def _present_value(row: Dict[str, Any], aliases: Sequence[str]) -> Tuple[Any, bool]:
+    """Return the first present value without treating ``False`` as missing."""
+    for alias in aliases:
+        if alias in row and row[alias] not in (None, ""):
+            return row[alias], True
+        # Notion checkboxes are returned as ``False``.  A false checkbox is
+        # still an explicitly present value, but only for known checkbox keys.
+        if alias in row and isinstance(row[alias], bool):
+            return row[alias], True
+    return None, False
+
+
+def _checkbox(value_: Any) -> Optional[bool]:
+    """Normalize a Notion checkbox or a short text answer."""
+    if value_ is None or value_ == "":
+        return None
+    if isinstance(value_, bool):
+        return value_
+    if isinstance(value_, (int, float)) and not isinstance(value_, bool):
+        return bool(value_)
+    normalized = text(value_).casefold()
+    if normalized in {"true", "1", "yes", "y", "on", "checked", "완료", "직접 완료", "사용", "포함"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off", "unchecked", "미완료", "제외", "사용 안 함"}:
+        return False
+    return None
+
+
+def _progress_override_for(category: str, source: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    """Normalize one category's manual aggregation controls."""
+    raw = source or {}
+    if isinstance(raw, bool):
+        raw = {"manual_complete": raw}
+    if not isinstance(raw, dict):
+        raw = {}
+    manual = _checkbox(raw.get("manual_complete"))
+    if manual is None:
+        manual, _ = _present_value(raw, PROGRESS_MANUAL_ALIASES)
+        manual = _checkbox(manual)
+    auto_exclude = _checkbox(raw.get("auto_exclude"))
+    if auto_exclude is None:
+        auto_exclude, _ = _present_value(raw, PROGRESS_AUTO_EXCLUDE_ALIASES)
+        auto_exclude = _checkbox(auto_exclude)
+    enabled = _checkbox(raw.get("enabled"))
+    if enabled is None:
+        enabled, present = _present_value(raw, PROGRESS_ENABLED_ALIASES)
+        enabled = _checkbox(enabled) if present else True
+    return {
+        "enabled": True if enabled is None else enabled,
+        "manual_complete": bool(manual),
+        "auto_exclude": bool(auto_exclude),
+    }
+
+
+def progress_overrides_from_trip(trip: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, bool]]:
+    """Read category controls from the trip summary without changing it.
+
+    Newer templates can expose per-category controls (for example
+    ``일정 직접 완료``).  Older copies only have the global
+    ``진행도 수동 완료``/``자동 제외`` checkboxes, so those are treated as a
+    global fallback.  A per-category value always wins over the fallback.
+    """
+    trip = trip or {}
+    result: Dict[str, Dict[str, bool]] = {
+        key: _progress_override_for(key, {}) for key in PROGRESS_CATEGORIES
+    }
+    aliases_by_category = {
+        "itinerary": ("일정", "날짜별 일정", "itinerary"),
+        "reservation": ("예약", "예약·체크리스트", "reservation"),
+        "task": ("할 일", "준비할 일", "task"),
+        "packing": ("준비물", "packing"),
+        "shopping": ("쇼핑", "shopping"),
+    }
+    nested = trip.get("진행도 수동 조정") or trip.get("progress_overrides")
+    if isinstance(nested, dict):
+        for key in PROGRESS_CATEGORIES:
+            result[key].update(_progress_override_for(key, nested.get(key) or nested.get(PROGRESS_CATEGORIES[key]["label"])))
+
+    # Global controls are intentionally only a fallback.  A false checkbox in
+    # an old copy must not turn off automatic aggregation for every row.
+    global_manual, global_manual_present = _present_value(trip, ("진행도 수동 완료", "직접 완료"))
+    global_exclude, global_exclude_present = _present_value(trip, ("자동 제외", "진행도 자동 제외"))
+    if global_manual_present or global_exclude_present:
+        global_manual_bool = _checkbox(global_manual)
+        global_exclude_bool = _checkbox(global_exclude)
+        for key in PROGRESS_CATEGORIES:
+            if global_manual_bool is True:
+                result[key]["manual_complete"] = True
+            if global_exclude_bool is True:
+                result[key]["auto_exclude"] = True
+
+    for key, aliases in aliases_by_category.items():
+        category_values: Dict[str, Any] = {}
+        for alias in aliases:
+            for suffix, names in (
+                ("manual_complete", (f"{alias} 직접 완료", f"{alias} 진행도 수동 완료", f"{alias} 수동 완료")),
+                ("auto_exclude", (f"{alias} 자동 제외", f"{alias} 진행도 자동 제외")),
+                ("enabled", (f"{alias} 사용", f"{alias} 사용 여부", f"{alias} 집계 포함")),
+            ):
+                found, present = _present_value(trip, names)
+                if present:
+                    category_values[suffix] = found
+        if category_values:
+            result[key].update(_progress_override_for(key, category_values))
+    return result
+
+
+def _progress_row_title(row: Dict[str, Any]) -> str:
+    return text(value(row, "title"))
+
+
+def calculate_progress(
+    itinerary: Sequence[Dict[str, Any]] = (),
+    reservations: Sequence[Dict[str, Any]] = (),
+    tasks: Sequence[Dict[str, Any]] = (),
+    packing: Sequence[Dict[str, Any]] = (),
+    shopping: Sequence[Dict[str, Any]] = (),
+    *,
+    include_shopping: bool = False,
+    trip: Optional[Dict[str, Any]] = None,
+    overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Calculate the same effective progress used by the Notion progress card.
+
+    Automatic statuses remain the default.  A checked direct-complete control
+    wins over automatic status, while automatic-exclude changes an automatic
+    completion back to incomplete.  Explicitly excluded rows are removed from
+    the denominator.  A missing category is never interpreted as 100%.
+    """
+    configured = progress_overrides_from_trip(trip)
+    if isinstance(overrides, dict):
+        for key in PROGRESS_CATEGORIES:
+            if key in overrides:
+                configured[key].update(_progress_override_for(key, overrides[key]))
+    rows_by_category: Dict[str, Sequence[Dict[str, Any]]] = {
+        "itinerary": itinerary,
+        "reservation": reservations,
+        "task": tasks,
+        "packing": packing,
+    }
+    if include_shopping:
+        rows_by_category["shopping"] = shopping
+
+    categories: Dict[str, Dict[str, Any]] = {}
+    total_target = 0
+    total_completed = 0
+    for key, spec in PROGRESS_CATEGORIES.items():
+        if key not in rows_by_category:
+            continue
+        control = configured[key]
+        target = 0
+        completed = 0
+        row_override_used = False
+        done_statuses = {text(item).casefold() for item in spec["done"]}
+        excluded_statuses = {text(item).casefold() for item in spec["excluded"]}
+        for row in rows_by_category[key] or ():
+            if not isinstance(row, dict) or not _progress_row_title(row):
+                continue
+            status = text(value(row, "status")).casefold()
+            if status in excluded_statuses:
+                continue
+            row_enabled, enabled_present = _present_value(row, PROGRESS_ENABLED_ALIASES)
+            if enabled_present and _checkbox(row_enabled) is False:
+                continue
+            target += 1
+            row_manual, row_manual_present = _present_value(row, PROGRESS_MANUAL_ALIASES)
+            row_excluded, row_excluded_present = _present_value(row, PROGRESS_AUTO_EXCLUDE_ALIASES)
+            manual = _checkbox(row_manual) if row_manual_present else None
+            automatic_exclude = (_checkbox(row_excluded) is True if row_excluded_present else False) or control["auto_exclude"]
+            row_override_used = row_override_used or manual is True or (_checkbox(row_excluded) is True if row_excluded_present else False)
+            if manual is True or control["manual_complete"]:
+                completed += 1
+            elif not automatic_exclude and status in done_statuses:
+                completed += 1
+        percent = round(completed / target * 100, 2) if target else 0.0
+        categories[key] = {
+            "label": spec["label"],
+            "enabled": bool(control["enabled"]),
+            "completed": completed,
+            "target": target,
+            "remaining": max(target - completed, 0),
+            "percent": percent,
+            "status": "등록 전" if target == 0 else ("완료" if completed == target else ("시작 전" if completed == 0 else "진행 중")),
+            "mode": "수동" if control["manual_complete"] or control["auto_exclude"] or row_override_used else "자동",
+        }
+        if control["enabled"]:
+            total_target += target
+            total_completed += completed
+    total_percent = round(total_completed / total_target * 100, 2) if total_target else 0.0
+    status = "등록 전" if total_target == 0 else ("완료" if total_completed == total_target else ("시작 전" if total_completed == 0 else "진행 중"))
+    return {
+        "completed": total_completed,
+        "target": total_target,
+        "remaining": max(total_target - total_completed, 0),
+        "percent": total_percent,
+        "status": status,
+        "categories": categories,
+        "include_shopping": bool(include_shopping),
+    }
+
+
 def configure_output() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -377,6 +620,32 @@ def value(row: Dict[str, Any], key: str, default: Any = None) -> Any:
 
 def text(value_: Any) -> str:
     return "" if value_ is None else str(value_).strip()
+
+
+def _references(value_: Any) -> List[str]:
+    """Normalize a title/key or a Notion relation into comparable refs.
+
+    Notion returns a relation as a list of page IDs, while JSON snapshots and
+    the portable fallback usually contain a title or a plain ``지갑 키``.  A
+    stringified Python list (``"['...']"``) can never match the wallet row and
+    was the reason compact expenses were silently omitted from wallet totals.
+    Keep every useful representation so both shapes resolve to one row.
+    """
+    if value_ in (None, ""):
+        return []
+    if isinstance(value_, dict):
+        for key in ("id", "page_id", "url", "name"):
+            if value_.get(key) not in (None, ""):
+                return [text(value_[key])]
+        return []
+    if isinstance(value_, (list, tuple, set)):
+        refs: List[str] = []
+        for item in value_:
+            for ref in _references(item):
+                if ref and ref not in refs:
+                    refs.append(ref)
+        return refs
+    return [text(value_)] if text(value_) else []
 
 
 def number(value_: Any, default: Optional[float] = None) -> Optional[float]:
@@ -1117,6 +1386,8 @@ def calculate_budget(wallets: Sequence[Dict[str, Any]], expenses: Sequence[Dict[
     spent = 0.0
     unknown: List[Dict[str, Any]] = []
     wallet_report: Dict[str, Dict[str, Any]] = {}
+    wallet_currency: Dict[str, str] = {}
+    wallet_ref_to_key: Dict[str, str] = {}
     for wallet in wallets:
         currency = text(value(wallet, "currency")) or base
         amount = number(value(wallet, "amount"), 0.0) or 0.0
@@ -1127,17 +1398,39 @@ def calculate_budget(wallets: Sequence[Dict[str, Any]], expenses: Sequence[Dict[
         key = row_id(wallet)
         wallet_report[key] = {"wallet": key, "currency": currency, "prepared": amount,
                               "spent": 0.0, "remaining": amount, "usage_rate": 0.0}
+        wallet_currency[key] = currency
+        # A Notion snapshot exposes the row page ID in ``id`` and a portable
+        # snapshot may expose only the title.  Accept both as references.
+        for ref in {key, *(_references(wallet.get("id"))), *(_references(value(wallet, "wallet")))}:
+            if ref:
+                wallet_ref_to_key[ref] = key
         prepared += amount * converted
+    wallet_keys = set(wallet_report)
     category: Dict[str, float] = defaultdict(float)
     paid_by: Dict[str, float] = defaultdict(float)
     for expense in expenses:
         status = text(value(expense, "status"))
         if status in {"취소", "예정"} and not (include_planned and status == "예정"):
             continue
-        currency = text(value(expense, "currency")) or base
         amount = number(value(expense, "amount"))
-        if amount is None:
+        # A zero/negative amount is not a valid ledger entry.  Accepting a
+        # negative expense would make a wallet appear to grow and would make
+        # the summary disagree with the visible usage table.
+        if amount is None or amount <= 0:
             continue
+        wallet_refs = _references(value(expense, "wallet"))
+        wallet_key = next((wallet_ref_to_key[ref] for ref in wallet_refs if ref in wallet_ref_to_key), "")
+        if not wallet_key and not wallet_refs and len(wallet_keys) == 1:
+            # The compact usage view hides the wallet key.  With exactly one
+            # wallet the relationship is unambiguous, so still update its
+            # balance.
+            wallet_key = next(iter(wallet_keys))
+        if wallet_key not in wallet_keys:
+            # With zero or multiple wallets, an unlinked expense must not be
+            # counted globally while remaining absent from every wallet card.
+            unknown.append({"kind": "expense", "name": row_id(expense), "reason": "wallet_required"})
+            continue
+        currency = text(value(expense, "currency")) or wallet_currency.get(wallet_key) or base
         converted = rate_for(currency, base, rates)
         if converted is None:
             unknown.append({"kind": "expense", "name": row_id(expense), "currency": currency})
@@ -1148,7 +1441,6 @@ def calculate_budget(wallets: Sequence[Dict[str, Any]], expenses: Sequence[Dict[
         spent += converted_amount
         category_name = text(expense.get("카테고리") or expense.get("예약 대상") or expense.get("분류") or transaction) or "기타"
         category[category_name] += converted_amount
-        wallet_key = text(value(expense, "wallet"))
         if wallet_key in wallet_report:
             wallet_report[wallet_key]["spent"] += converted_amount
         payer = text(value(expense, "payer"))
@@ -1282,7 +1574,11 @@ def refresh_view(trip: Dict[str, Any], itinerary: Sequence[Dict[str, Any]],
                  reservations: Sequence[Dict[str, Any]] = (), stays: Sequence[Dict[str, Any]] = (),
                  wallets: Sequence[Dict[str, Any]] = (), expenses: Sequence[Dict[str, Any]] = (),
                  now: Optional[dt.datetime] = None,
-                 shopping: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+                 shopping: Sequence[Dict[str, Any]] = (),
+                 tasks: Sequence[Dict[str, Any]] = (),
+                 packing: Sequence[Dict[str, Any]] = (),
+                 include_shopping: Optional[bool] = None,
+                 progress_overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     current = now or dt.datetime.now()
     events = [(event_datetime(row, "start") or parse_datetime(value(row, "date")), row)
               for row in itinerary if active(row)]
@@ -1305,9 +1601,25 @@ def refresh_view(trip: Dict[str, Any], itinerary: Sequence[Dict[str, Any]],
                         "planned": sum(text(value(row, "status")) in {"아이디어", "구매 예정", "보류", ""}
                                         for row in shopping_rows),
                         "purchased": sum(text(value(row, "status")) == "구매 완료" for row in shopping_rows)}
+    if include_shopping is None:
+        shopping_flag, present = _present_value(
+            trip, ("쇼핑 사용", "쇼핑 사용 여부", "쇼핑 포함", "쇼핑 활성", "shopping_enabled")
+        )
+        include_shopping = _checkbox(shopping_flag) if present else False
+    progress = calculate_progress(
+        itinerary,
+        reservations,
+        tasks,
+        packing,
+        shopping,
+        include_shopping=bool(include_shopping),
+        trip=trip,
+        overrides=progress_overrides,
+    )
     return {"date": current.date().isoformat(), "today": today,
             "next": next_event, "confirmed_stays": [row for row in stays if text(value(row, "status")) == "확정"],
-            "deadline_alerts": deadlines[:10], "budget": budget, "shopping": shopping_summary}
+            "deadline_alerts": deadlines[:10], "budget": budget, "shopping": shopping_summary,
+            "progress": progress}
 
 
 def notion_page_record(page: Dict[str, Any]) -> Dict[str, Any]:
@@ -1405,7 +1717,7 @@ def load_notion_snapshot(client: Any, mapping: Dict[str, Any], trip_id: str,
     needed_by_command = {
         "check": {"itinerary", "reservation", "stay", "place", "traveler", "task", "packing"},
         "budget": {"wallet", "expense", "traveler", "split", "settlement", "budget"},
-        "refresh": {"itinerary", "reservation", "stay", "wallet", "expense", "shopping", "material"},
+        "refresh": {"itinerary", "reservation", "stay", "wallet", "expense", "shopping", "material", "task", "packing"},
     }
     selected = needed_by_command.get(command, set(all_keys))
     candidates = [trip_id, text(trip_page.get("여행 키")), text(trip_page.get("여행")), text(trip_page.get("id"))]
@@ -1603,7 +1915,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 result = refresh_view(source.get("trip", {}), source.get("itinerary", []),
                                       source.get("reservation", []), source.get("stay", []),
                                       source.get("wallet", []), source.get("expense", []), now,
-                                      source.get("shopping", []))
+                                      source.get("shopping", []), source.get("task", []),
+                                      source.get("packing", []))
         print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
         return 0
     except (OSError, ValueError, KeyError) as exc:
