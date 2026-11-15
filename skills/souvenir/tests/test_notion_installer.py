@@ -193,6 +193,131 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(payload["정보 상태"]["select"]["name"], "사용자 확인 완료")
         self.assertEqual(payload["여행 키"]["rich_text"][0]["text"]["content"], result["trip_id"])
 
+    def test_traveler_profiles_write_independent_columns_and_are_idempotent(self):
+        self.install()
+        result = self.scaffold(traveler_count=2)
+        profiles = [
+            {
+                "여행자": "유성",
+                "역할": "총괄",
+                "먹고 싶은 음식": "라멘",
+                "선호 이동": "지하철",
+                "숙소 취향": "역 근처",
+                "주의사항": "견과류 없음",
+                "추가 요청": "늦은 밤 일정 제외",
+            },
+            {
+                "여행자": "민수",
+                "역할": "예약",
+                "먹고 싶은 음식": "스시",
+                "선호 이동": "도보",
+                "숙소 취향": "조용한 방",
+                "주의사항": "미정",
+                "추가 요청": "미정",
+            },
+        ]
+        saved = ni.save_traveler_profiles(self.manifest, self.client, self.path,
+                                          result["trip_id"], profiles, confirmed=True)
+        self.assertEqual(saved["status"], "complete")
+        self.assertEqual(len(saved["updated"]), 2)
+        self.assertEqual(saved["created"], [])
+        traveler_db = ni.read_json(self.path)["databases"]["traveler"]
+        row_id = saved["updated"][0]
+        payload = next(payload for kind, parent, payload, current_id in self.client.created
+                       if kind == "row" and parent == traveler_db and current_id == row_id)
+        self.assertEqual(payload["역할"]["rich_text"][0]["text"]["content"], "총괄")
+        self.assertEqual(payload["먹고 싶은 음식"]["rich_text"][0]["text"]["content"], "라멘")
+        self.assertEqual(payload["주의사항"]["rich_text"][0]["text"]["content"], "견과류 없음")
+        self.assertNotIn("의견·요청", payload)
+        second = ni.save_traveler_profiles(self.manifest, self.client, self.path,
+                                           result["trip_id"], profiles, confirmed=True)
+        self.assertEqual(second["created"], [])
+        self.assertEqual(second["updated"], saved["updated"])
+
+    def test_traveler_profiles_reject_combined_legacy_column(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        with self.assertRaisesRegex(ni.InstallerError, "의견·요청"):
+            ni.save_traveler_profiles(
+                self.manifest, self.client, self.path, result["trip_id"],
+                [{"여행자": "유성", "의견·요청": "총괄, 라멘"}], confirmed=True,
+            )
+
+    def test_part_save_routes_fields_and_reuses_scaffold_rows(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        rows = [{
+            "일정": "공항 도착·체크인",
+            "일차": 1,
+            "날짜": "2026-12-12",
+            "시작": "2026-12-12T14:00:00",
+            "종료": "2026-12-12T16:00:00",
+            "장소": "후쿠오카 공항",
+            "플랜 B": "공항 라운지",
+        }]
+        saved = ni.save_part_rows(self.manifest, self.client, self.path,
+                                  result["trip_id"], "날짜별 일정", rows, confirmed=True)
+        self.assertEqual(saved["created"], [])
+        self.assertEqual(len(saved["updated"]), 1)
+        itinerary_db = ni.read_json(self.path)["databases"]["itinerary"]
+        row_id = saved["updated"][0]
+        payload = next(payload for kind, parent, payload, current_id in self.client.created
+                       if kind == "row" and parent == itinerary_db and current_id == row_id)
+        self.assertEqual(payload["일차"]["number"], 1)
+        self.assertEqual(payload["장소"]["rich_text"][0]["text"]["content"], "후쿠오카 공항")
+        self.assertEqual(payload["플랜 B"]["rich_text"][0]["text"]["content"], "공항 라운지")
+
+    def test_part_save_updates_trip_summary_in_place(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        saved = ni.save_part_rows(
+            self.manifest, self.client, self.path, result["trip_id"], "기본 여행 정보",
+            [{"여행지": "후쿠오카", "여행 템포": "느긋하게", "가장 중요한 기준": "이동 편의"}],
+            confirmed=True,
+        )
+        self.assertEqual(saved["created"], [])
+        self.assertEqual(saved["updated"], [result["trip_id"]])
+        trip_db = ni.read_json(self.path)["databases"]["trip"]
+        payload = next(payload for kind, parent, payload, row_id in self.client.created
+                       if kind == "row" and parent == trip_db and row_id == result["trip_id"])
+        self.assertEqual(payload["목적지"]["rich_text"][0]["text"]["content"], "후쿠오카")
+        self.assertEqual(payload["여행 템포"]["select"]["name"], "느긋하게")
+
+    def test_part_save_rejects_legacy_combined_field(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        with self.assertRaisesRegex(ni.InstallerError, "의견·요청"):
+            ni.save_part_rows(self.manifest, self.client, self.path,
+                              result["trip_id"], "숙소",
+                              [{"숙소명": "하카타 호텔", "의견·요청": "역 근처"}],
+                              confirmed=True)
+
+    def test_budget_part_splits_wallet_and_expense_rows(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        saved = ni.save_part_rows(
+            self.manifest, self.client, self.path, result["trip_id"], "예산·여행 지갑",
+            [{"지갑 이름": "유성 개인 지갑", "통화": "JPY", "준비 금액": 50000,
+              "사용처": "라멘", "거래 유형": "지출", "결제 단계": "현장 결제",
+              "결제 수단": "카드", "실제 사용 금액": 1200, "예산 카테고리": "식비"}],
+            confirmed=True,
+        )
+        self.assertEqual(saved["status"], "complete")
+        mapping = ni.read_json(self.path)["databases"]
+        wallet_payload = next(payload for kind, parent, payload, _row_id in self.client.created
+                              if kind == "row" and parent == mapping["wallet"]
+                              and payload.get("통화", {}).get("select", {}).get("name") == "JPY"
+                              and payload.get("준비 금액", {}).get("number") == 50000)
+        expense_payload = next(payload for kind, parent, payload, _row_id in self.client.created
+                               if kind == "row" and parent == mapping["expense"]
+                               and payload.get("금액", {}).get("number") == 1200)
+        self.assertEqual(wallet_payload["준비 금액"]["number"], 50000)
+        self.assertEqual(expense_payload["사용처"]["rich_text"][0]["text"]["content"], "라멘")
+        budget_payload = next(payload for kind, parent, payload, _row_id in self.client.created
+                              if kind == "row" and parent == mapping["budget"]
+                              and payload.get("카테고리", {}).get("select", {}).get("name") == "식비")
+        self.assertIn("카테고리", budget_payload)
+
     def test_unconfirmed_or_incomplete_shopping_rows_never_write(self):
         self.install()
         result = self.scaffold(traveler_count=1)

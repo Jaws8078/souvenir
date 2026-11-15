@@ -11,6 +11,8 @@
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약을 읽기 전용 화면용 JSON으로 만든다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 - `shopping`: 품목명만 받은 요청을 조사 후보 확인 패킷으로 만들거나, 외부 검색 결과 JSON에서 선택한 후보를 `사용자 확인 완료` 상태의 저장 준비 행으로 정규화한다. 검색 자체는 호스트의 웹·이미지 도구가 수행하고, 엔진은 값을 추정하지 않는다.
 - `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다.
+- `fields`: 각 파트가 사용자에게 먼저 제시해야 하는 전체 입력 필드와 대상 DB를 반환한다. `normalize_part_input`은 답변을 해당 DB의 속성명으로 분리하며, 사람별 `의견·요청` 합치기 입력은 거부한다.
+- fallback 설치기는 승인된 정규화 행을 `part-save --part <파트> --confirm`으로 해당 DB에 저장한다. 일정은 기존 `일차` 행을 재사용하고, 항공·숙소·장소·예산·준비물도 각 DB의 제목·속성에 직접 매핑한다.
 
 ## 오프라인 사용
 
@@ -63,6 +65,9 @@ python3 skills/souvenir/scripts/run_souvenir.py places \
 ```bash
 python3 skills/souvenir/scripts/trip_engine.py import \
   --text 'https://maps.app.goo.gl/공유토큰' --kind link --pretty
+
+# 파트별 질문 필드와 저장 대상 확인
+python3 skills/souvenir/scripts/run_souvenir.py fields --part '여행 개요·취향' --pretty
 ```
 
 ## Notion 연결
@@ -84,6 +89,16 @@ fallback 설치기를 쓰는 환경에서는 승인된 행 JSON만 Notion에 저
 NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py shopping-save \
   --mapping .souvenir-install.json --trip-id "<여행 페이지 ID>" \
   --shopping-input shopping-confirmed.json --confirm --pretty
+
+# 사람별 입력을 동행자 표의 독립 열에 저장
+NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py traveler-save \
+  --mapping .souvenir-install.json --trip-id "<여행 페이지 ID>" \
+  --traveler-input traveler-profiles.json --confirm --pretty
+
+# 다른 파트도 같은 정규화 행 계약으로 저장
+NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py part-save \
+  --mapping .souvenir-install.json --trip-id "<여행 페이지 ID>" \
+  --part "날짜별 일정" --part-input itinerary.json --confirm --pretty
 ```
 
 로컬 실행기는 사용자의 요청이 있을 때만 실행되며 백그라운드에서 계속 돌지 않는다. 로컬 실행기가 없는 ChatGPT 웹·모바일 환경에서는 Python 엔진을 자동 호출할 수 없고, Notion 플러그인과 채팅 안내만 사용할 수 있다. 별도 MCP 서버를 설치해야 하는 구조는 아니다.

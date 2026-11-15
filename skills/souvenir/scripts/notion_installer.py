@@ -1031,6 +1031,472 @@ def save_shopping_rows(manifest: Dict[str, Any], client: NotionClient,
                 }
 
 
+def _traveler_row_properties(manifest: Dict[str, Any], row: Dict[str, Any],
+                             trip_id: str, operation_key: str,
+                             include_empty: bool = False) -> Dict[str, Any]:
+    """Encode one person's answers without collapsing fields into a memo."""
+    database = database_by_key(manifest, "traveler")
+    specs = {item["name"]: item for item in database.get("properties", [])
+             if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    name = str(row.get("여행자") or row.get("이름") or "").strip()
+    if not name:
+        raise InstallerError("동행자 입력에 이름이 필요합니다.")
+    if "의견·요청" in row:
+        raise InstallerError("의견·요청은 저장하지 않습니다. 역할·음식·이동·숙소·주의사항·추가 요청을 각각 입력하세요.")
+    properties: Dict[str, Any] = {
+        database["title_property"]: {"title": title_payload(name)},
+        IDEMPOTENCY_PROPERTY: {"rich_text": rich_text(operation_key)},
+    }
+    values = dict(row)
+    values.pop("여행자", None)
+    values.pop("이름", None)
+    values["여행 키"] = trip_id
+    for property_name, value in values.items():
+        if property_name not in specs or property_name in {database["title_property"], "의견·요청"}:
+            continue
+        if value in (None, "") and not include_empty:
+            continue
+        encoded = property_value(specs[property_name], value)
+        if encoded is not None:
+            properties[property_name] = encoded
+    return properties
+
+
+def _traveler_rows_for_trip(client: Any, database_id: str, trip_id: str) -> List[Dict[str, Any]]:
+    rows = client.query_database(database_id, {
+        "filter": {"property": "여행 키", "rich_text": {"equals": trip_id}},
+    })
+    return [row for row in rows
+            if _plain_property_text(row.get("properties", {}), "여행 키") == trip_id]
+
+
+def save_traveler_profiles(manifest: Dict[str, Any], client: NotionClient,
+                           mapping_path: Path, trip_id: str,
+                           profiles: Sequence[Dict[str, Any]],
+                           confirmed: bool = False) -> Dict[str, Any]:
+    """Save person-by-person answers into their separate traveler columns.
+
+    The caller should display every field and obtain one batch confirmation
+    before calling this function.  Existing rows are updated in place with an
+    optimistic version check; unrelated properties and rows are preserved.
+    """
+    if not trip_id:
+        raise InstallerError("동행자 정보를 저장하려면 여행 페이지 ID가 필요합니다.")
+    if not profiles:
+        return {"status": "skipped", "created": [], "updated": [], "rows": []}
+    if not confirmed:
+        raise InstallerError("동행자 입력을 저장하기 전에 사용자 확인이 필요합니다.")
+    mapping = read_json(mapping_path)
+    check_pending(mapping)
+    # This guard is intentionally local to the writer so a malformed host
+    # payload cannot bypass the input contract and write a combined field.
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            raise InstallerError("동행자 입력은 행 객체 배열이어야 합니다.")
+        if "의견·요청" in profile:
+            raise InstallerError("의견·요청은 저장하지 않습니다. 각 입력 항목을 분리해 주세요.")
+    database_id = (mapping.get("databases") or {}).get("traveler")
+    if not database_id:
+        raise InstallerError("설치 기록에 동행자 데이터베이스 매핑이 없습니다.")
+    if mapping.get("status") != "complete":
+        raise InstallerError("먼저 Souvenir 설치를 완료해야 동행자 정보를 저장할 수 있습니다.")
+
+    trip_page = client.get_page(trip_id)
+    trip_properties = trip_page.get("properties", {}) if isinstance(trip_page, dict) else {}
+    trip_key = _plain_property_text(trip_properties, "여행 키") or trip_id
+
+    normalized = [dict(profile) for profile in profiles]
+    workspace_key = str(mapping.get("parent_page_id") or "unknown")
+    owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
+    with operation_locks(mapping_path, workspace_key, "traveler-save"):
+        mapping = read_json(mapping_path)
+        ensure_operation_log(mapping, mapping_path, client)
+        with distributed_lease(workspace_key, trip_id, "traveler-save", owner, database_id):
+            with operation_lease(mapping, mapping_path, client, trip_id, "traveler-save", owner, database_id):
+                created: List[str] = []
+                updated: List[str] = []
+                relation_cache: Dict[str, bool] = {}
+                keys: List[str] = []
+                for index, profile in enumerate(normalized, start=1):
+                    name = str(profile.get("여행자") or profile.get("이름") or f"동행자 {index}").strip()
+                    profile["여행자"] = name
+                    profile.setdefault("상태", "참여")
+                    # scaffold_trip keys traveler rows with the summary row's
+                    # stable 여행 키, not its opaque Notion page ID.
+                    key = stable_key("trip", trip_key, "traveler", index)
+                    keys.append(key)
+                    properties = _traveler_row_properties(manifest, profile, trip_id, key)
+                    existing = find_existing_row(client, database_id, key)
+                    if existing:
+                        current = client.get_page(existing)
+                        expected = current.get("last_edited_time") if isinstance(current, dict) else None
+                        recorded_write(
+                            mapping,
+                            mapping_path,
+                            f"traveler:update:{key}",
+                            lambda: client.update_page_properties(existing, properties, expected),
+                            lambda _result: None,
+                            verify=lambda result: verify_updated(result, existing),
+                            idempotency_key=key,
+                        )
+                        _link_row_to_trip(client, existing, database_id, trip_id, relation_cache)
+                        updated.append(existing)
+                        continue
+                    holder: Dict[str, Any] = {}
+                    recorded_write(
+                        mapping,
+                        mapping_path,
+                        f"traveler:{key}",
+                        lambda: client.create_database_page(database_id, properties),
+                        lambda result: holder.update({"id": result.get("id")}),
+                        verify=lambda result: verify_created(client, result),
+                        idempotency_key=key,
+                    )
+                    created_id = holder.get("id")
+                    if not created_id:
+                        raise UncertainWriteError("동행자 행 생성 후 페이지 ID를 확인하지 못했습니다.")
+                    _link_row_to_trip(client, created_id, database_id, trip_id, relation_cache)
+                    created.append(created_id)
+                visible = _traveler_rows_for_trip(client, database_id, trip_id)
+                visible_keys = {
+                    _plain_property_text(row.get("properties", {}), IDEMPOTENCY_PROPERTY)
+                    for row in visible
+                }
+                if not set(keys).issubset(visible_keys):
+                    raise UncertainWriteError("동행자 저장 후 현재 여행의 실제 행을 다시 확인하지 못했습니다.")
+                return {
+                    "status": "complete",
+                    "trip_id": trip_id,
+                    "created": created,
+                    "updated": updated,
+                    "rows": visible,
+                }
+
+
+PART_SAVE_DATABASES = {
+    "trip": "trip",
+    "traveler": "traveler",
+    "itinerary": "itinerary",
+    "air": "long_transport",
+    "stay": "stay",
+    "place": "place",
+    "shopping": "shopping",
+    "budget": "budget",
+    "preparation": "task",
+}
+PART_SAVE_ALIASES = {
+    "여행": "trip", "기본 정보": "trip", "기본 여행 정보": "trip", "여행 정보": "trip",
+    "여행 개요·취향": "traveler", "동행자": "traveler", "여행자": "traveler",
+    "날짜별 일정": "itinerary", "일정": "itinerary",
+    "항공": "air", "항공편": "air", "숙소": "stay", "숙소 후보": "stay",
+    "장소": "place", "장소 보관함": "place", "쇼핑": "shopping",
+    "예산": "budget", "여행 지갑": "budget", "예산·여행 지갑": "budget",
+    "준비물": "preparation", "준비할 일": "preparation", "준비물·준비할 일": "preparation",
+}
+PART_TITLE_FIELDS = {
+    "trip": ("여행", "여행지", "목적지"),
+    "traveler": ("여행자", "이름"),
+    "itinerary": ("일정", "일정명"),
+    "air": ("항공편", "구간"),
+    "stay": ("숙소", "숙소명"),
+    "place": ("장소", "장소명"),
+    "shopping": ("품목", "품목명"),
+    "budget": ("예산 항목", "지갑 이름", "지갑", "카테고리"),
+    "preparation": ("할 일", "준비물", "항목"),
+}
+DATABASE_PART_KEYS = {
+    "trip": "trip",
+    "traveler": "traveler", "itinerary": "itinerary", "long_transport": "air",
+    "stay": "stay", "place": "place", "shopping": "shopping", "budget": "budget",
+    "task": "preparation", "packing": "preparation", "wallet": "budget",
+    "expense": "budget", "budget": "budget", "split": "budget", "settlement": "budget",
+}
+
+
+def _part_key(value: str) -> str:
+    key = str(value or "").strip()
+    return PART_SAVE_ALIASES.get(key, key.lower())
+
+
+def _part_title(part: str, row: Dict[str, Any]) -> str:
+    for field in PART_TITLE_FIELDS[part]:
+        value = row.get(field)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _part_database_for_row(manifest: Dict[str, Any], part: str, row: Dict[str, Any]) -> str:
+    """Choose the concrete DB for a preparation row without asking twice."""
+    if part != "preparation":
+        return PART_SAVE_DATABASES[part]
+    packing_fields = {"준비물", "공용·개인", "분류", "필수", "수량", "구매 필요"}
+    return "packing" if packing_fields.intersection(row) else "task"
+
+
+def _expand_part_rows(part: str, rows: Sequence[Dict[str, Any]]) -> List[tuple[str, Dict[str, Any], int]]:
+    """Expand mixed budget answers into the concrete tables they belong to."""
+    expanded: List[tuple[str, Dict[str, Any], int]] = []
+    for source_index, raw in enumerate(rows, start=1):
+        row = dict(raw)
+        if part != "budget":
+            expanded.append((_part_database_for_row({}, part, row), row, source_index))
+            continue
+        wallet_fields = {"지갑 이름", "지갑", "통화", "준비 금액"}
+        expense_fields = {"사용처", "거래 유형", "결제 단계", "결제 수단", "실제 사용 금액", "금액", "지갑 키"}
+        budget_fields = {"예산 카테고리", "카테고리", "예산 범위", "예산"}
+        split_fields = {"사용 내역 키", "부담자", "분담 방식", "부담액", "정산 포함"}
+        settlement_fields = {"보낸 사람", "받은 사람", "상태", "날짜"}
+        emitted = False
+        if wallet_fields.intersection(row):
+            expanded.append(("wallet", row, source_index))
+            emitted = True
+        if expense_fields.intersection(row):
+            expense = dict(row)
+            if "실제 사용 금액" in expense and "금액" not in expense:
+                expense["금액"] = expense["실제 사용 금액"]
+            expanded.append(("expense", expense, source_index))
+            emitted = True
+        if budget_fields.intersection(row):
+            budget = dict(row)
+            if "예산 카테고리" in budget and "카테고리" not in budget:
+                budget["카테고리"] = budget["예산 카테고리"]
+            expanded.append(("budget", budget, source_index))
+            emitted = True
+        if split_fields.intersection(row):
+            expanded.append(("split", row, source_index))
+            emitted = True
+        if settlement_fields.intersection(row) and (row.get("보낸 사람") or row.get("받은 사람")):
+            expanded.append(("settlement", row, source_index))
+            emitted = True
+        if not emitted:
+            expanded.append(("budget", row, source_index))
+    return expanded
+
+
+def _part_row_properties(manifest: Dict[str, Any], database_key: str,
+                         row: Dict[str, Any], trip_id: str,
+                         operation_key: str) -> Dict[str, Any]:
+    database = database_by_key(manifest, database_key)
+    specs = {item["name"]: item for item in database.get("properties", [])
+             if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    part_key = DATABASE_PART_KEYS.get(database_key, database_key)
+    title = _part_title(part_key, row)
+    # preparation rows are selected by their concrete DB, not by the alias
+    # name, so resolve their title directly from the schema.
+    if database_key == "task":
+        title = str(row.get("할 일") or row.get("항목") or "").strip()
+    elif database_key == "packing":
+        title = str(row.get("준비물") or row.get("항목") or "").strip()
+    elif database_key == "wallet":
+        title = str(row.get("지갑 이름") or row.get("지갑") or "").strip()
+    elif database_key == "expense":
+        title = str(row.get("내역") or row.get("사용처") or "").strip()
+    elif database_key == "budget":
+        title = str(row.get("예산 항목") or row.get("예산 카테고리") or row.get("카테고리") or "").strip()
+    elif database_key == "split":
+        title = str(row.get("분담") or row.get("사용 내역 키") or row.get("부담자") or "").strip()
+    elif database_key == "settlement":
+        title = f"{row.get('보낸 사람', '미정')} → {row.get('받은 사람', '미정')}"
+    if not title:
+        raise InstallerError(f"{database.get('title', database_key)} 입력에 제목 필드가 필요합니다.")
+    properties: Dict[str, Any] = {
+        database["title_property"]: {"title": title_payload(title)},
+        IDEMPOTENCY_PROPERTY: {"rich_text": rich_text(operation_key)},
+    }
+    values = dict(row)
+    title_aliases = set(PART_TITLE_FIELDS.get(part_key, ()))
+    title_aliases.update({"지갑 이름", "내역", "예산 항목", "분담"})
+    for alias in title_aliases:
+        # Keep an alias when it is a real non-title schema property (for
+        # example budget's ``카테고리``).  Drop only presentation aliases that
+        # have no matching Notion column.
+        if alias != database["title_property"] and alias not in specs:
+            values.pop(alias, None)
+    values["여행 키"] = trip_id
+    # Confirmation metadata is useful to the host but is not a Notion schema
+    # field unless the copied template explicitly has it.
+    for name, value in values.items():
+        if name not in specs or name in {"의견·요청", "추가 확인", "저장 가능", "여행지 확인"}:
+            continue
+        if value in (None, ""):
+            continue
+        encoded = property_value(specs[name], value)
+        if encoded is not None:
+            properties[name] = encoded
+    return properties
+
+
+def save_trip_fields(manifest: Dict[str, Any], client: NotionClient,
+                     mapping_path: Path, trip_id: str,
+                     row: Dict[str, Any], confirmed: bool = False) -> Dict[str, Any]:
+    """Update the existing trip summary without creating a second trip row."""
+    if not trip_id:
+        raise InstallerError("기본 여행 정보 저장에는 여행 페이지 ID가 필요합니다.")
+    if not confirmed:
+        raise InstallerError("기본 여행 정보 저장 전에 사용자 확인이 필요합니다.")
+    if not isinstance(row, dict):
+        raise InstallerError("기본 여행 정보는 하나의 행 객체여야 합니다.")
+    if "의견·요청" in row:
+        raise InstallerError("의견·요청은 저장하지 않습니다. 독립 입력 필드를 사용하세요.")
+    mapping = read_json(mapping_path)
+    check_pending(mapping)
+    check_manifest_version(mapping, manifest)
+    if mapping.get("status") != "complete":
+        raise InstallerError("먼저 Souvenir 설치를 완료해야 기본 여행 정보를 저장할 수 있습니다.")
+    database_id = (mapping.get("databases") or {}).get("trip")
+    if not database_id:
+        raise InstallerError("설치 기록에 여행 데이터베이스 매핑이 없습니다.")
+    database = database_by_key(manifest, "trip")
+    specs = {item["name"]: item for item in database.get("properties", [])
+             if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    aliases = {"여행지": "목적지", "인원 수": "인원", "여행 기간(일)": "기간(일)"}
+    properties: Dict[str, Any] = {}
+    for name, value in row.items():
+        canonical = aliases.get(name, name)
+        if canonical not in specs or canonical in {"여행 키", "자동 제외"}:
+            continue
+        if value in (None, ""):
+            continue
+        encoded = property_value(specs[canonical], value)
+        if encoded is not None:
+            properties[canonical] = encoded
+    if not properties:
+        raise InstallerError("저장할 기본 여행 정보가 없습니다.")
+    workspace_key = str(mapping.get("parent_page_id") or "unknown")
+    owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
+    with operation_locks(mapping_path, workspace_key, "trip-save"):
+        mapping = read_json(mapping_path)
+        ensure_operation_log(mapping, mapping_path, client)
+        with distributed_lease(workspace_key, trip_id, "trip-save", owner, database_id):
+            with operation_lease(mapping, mapping_path, client, trip_id, "trip-save", owner, database_id):
+                current = client.get_page(trip_id)
+                expected = current.get("last_edited_time") if isinstance(current, dict) else None
+                recorded_write(
+                    mapping, mapping_path, f"trip:update:{trip_id}",
+                    lambda: client.update_page_properties(trip_id, properties, expected),
+                    lambda _result: None,
+                    verify=lambda result: verify_updated(result, trip_id),
+                    idempotency_key=stable_key("trip-update", trip_id, sorted(properties)),
+                )
+                return {"status": "complete", "part": "trip", "trip_id": trip_id,
+                        "updated": [trip_id], "created": [], "properties": sorted(properties)}
+
+
+def save_part_rows(manifest: Dict[str, Any], client: NotionClient,
+                   mapping_path: Path, trip_id: str, part: str,
+                   rows: Sequence[Dict[str, Any]], confirmed: bool = False) -> Dict[str, Any]:
+    """Persist any normalized plan part using its explicit field contract.
+
+    This is the common fallback writer for itinerary, air, stay, place,
+    shopping, budget and preparation.  It accepts only normalized row objects,
+    writes each value to the matching schema property, reuses the same row on
+    retries, and rereads the trip-scoped rows before returning.  Specialized
+    writers (traveler-save and shopping-save) keep their stricter validation.
+    """
+    key = _part_key(part)
+    if key not in PART_SAVE_DATABASES:
+        raise InstallerError(f"저장할 수 없는 입력 파트입니다: {part}")
+    if not trip_id:
+        raise InstallerError("파트 저장에는 여행 페이지 ID가 필요합니다.")
+    if not rows:
+        return {"status": "skipped", "part": key, "created": [], "updated": [], "rows": []}
+    if not confirmed:
+        raise InstallerError("파트 입력을 저장하기 전에 사용자 확인이 필요합니다.")
+    if any(not isinstance(row, dict) for row in rows):
+        raise InstallerError("파트 입력은 행 객체 배열이어야 합니다.")
+    if key == "trip":
+        if len(rows) != 1:
+            raise InstallerError("기본 여행 정보는 한 번에 한 요약 행만 저장합니다.")
+        return save_trip_fields(manifest, client, mapping_path, trip_id, rows[0], confirmed=True)
+    if key == "traveler":
+        return save_traveler_profiles(manifest, client, mapping_path, trip_id, rows, confirmed=True)
+    if key == "shopping":
+        return save_shopping_rows(manifest, client, mapping_path, trip_id, rows, confirmed=True)
+    for row in rows:
+        if "의견·요청" in row:
+            raise InstallerError("의견·요청은 저장하지 않습니다. 독립 입력 필드를 사용하세요.")
+
+    mapping = read_json(mapping_path)
+    check_pending(mapping)
+    check_manifest_version(mapping, manifest)
+    if mapping.get("status") != "complete":
+        raise InstallerError("먼저 Souvenir 설치를 완료해야 파트 입력을 저장할 수 있습니다.")
+    entries = _expand_part_rows(key, rows)
+    database_keys = [database_key for database_key, _row, _source_index in entries]
+    for database_key in database_keys:
+        if database_key not in mapping.get("databases", {}):
+            raise InstallerError(f"설치 기록에 {database_key} 데이터베이스 매핑이 없습니다.")
+
+    trip_page = client.get_page(trip_id)
+    trip_properties = trip_page.get("properties", {}) if isinstance(trip_page, dict) else {}
+    trip_key = _plain_property_text(trip_properties, "여행 키") or trip_id
+    workspace_key = str(mapping.get("parent_page_id") or "unknown")
+    owner = os.environ.get("SOUVENIR_OPERATOR") or f"{socket.gethostname()}:{os.getpid()}"
+    with operation_locks(mapping_path, workspace_key, f"{key}-save"):
+        mapping = read_json(mapping_path)
+        ensure_operation_log(mapping, mapping_path, client)
+        target = ",".join(sorted(set(database_keys)))
+        with distributed_lease(workspace_key, trip_id, f"{key}-save", owner, target):
+            with operation_lease(mapping, mapping_path, client, trip_id, f"{key}-save", owner, target):
+                created: List[str] = []
+                updated: List[str] = []
+                relation_cache: Dict[str, bool] = {}
+                visible_rows: List[Dict[str, Any]] = []
+                for index, (database_key, row, source_index) in enumerate(entries, start=1):
+                    database_id = mapping["databases"][database_key]
+                    title = _part_title(key, row)
+                    if key == "itinerary" and row.get("일차") not in (None, ""):
+                        # scaffold_trip already created one row per day with
+                        # this exact key; update it instead of appending a
+                        # second copy when the user fills that day in.
+                        stable = stable_key("trip", trip_key, "itinerary", int(row["일차"]))
+                    elif key == "preparation" and title:
+                        stable = stable_key("trip", trip_key, database_key, title)
+                    else:
+                        stable = stable_key("trip", trip_key, key, database_key, source_index)
+                    properties = _part_row_properties(manifest, database_key, row, trip_id, stable)
+                    existing = find_existing_row(client, database_id, stable)
+                    if existing:
+                        current = client.get_page(existing)
+                        expected = current.get("last_edited_time") if isinstance(current, dict) else None
+                        recorded_write(
+                            mapping, mapping_path, f"{key}:update:{stable}",
+                            lambda existing=existing, properties=properties, expected=expected:
+                                client.update_page_properties(existing, properties, expected),
+                            lambda _result: None,
+                            verify=lambda result, existing=existing: verify_updated(result, existing),
+                            idempotency_key=stable,
+                        )
+                        _link_row_to_trip(client, existing, database_id, trip_id, relation_cache)
+                        updated.append(existing)
+                        continue
+                    holder: Dict[str, Any] = {}
+                    recorded_write(
+                        mapping, mapping_path, f"{key}:create:{stable}",
+                        lambda database_id=database_id, properties=properties:
+                            client.create_database_page(database_id, properties),
+                        lambda result: holder.update({"id": result.get("id")}),
+                        verify=lambda result: verify_created(client, result),
+                        idempotency_key=stable,
+                    )
+                    created_id = holder.get("id")
+                    if not created_id:
+                        raise UncertainWriteError("파트 행 생성 후 페이지 ID를 확인하지 못했습니다.")
+                    _link_row_to_trip(client, created_id, database_id, trip_id, relation_cache)
+                    created.append(created_id)
+                for database_key in sorted(set(database_keys)):
+                    database_id = mapping["databases"][database_key]
+                    scoped = client.query_database(database_id, {
+                        "filter": {"property": "여행 키", "rich_text": {"equals": trip_id}},
+                    })
+                    visible_rows.extend(scoped)
+                return {
+                    "status": "complete", "part": key, "trip_id": trip_id,
+                    "created": created, "updated": updated, "rows": visible_rows,
+                }
+
+
 def _has_trip_relation(client: Any, database_id: str) -> bool:
     """Return whether a target database exposes the live template's 여행 relation.
 
@@ -1887,7 +2353,7 @@ def install(manifest: Dict[str, Any], client: NotionClient, parent_id: str, mapp
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir portable Notion template installer")
-    parser.add_argument("command", choices=["validate", "plan", "install", "scaffold", "shopping-save"])
+    parser.add_argument("command", choices=["validate", "plan", "install", "scaffold", "part-save", "shopping-save", "traveler-save"])
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--mapping", type=Path, default=DEFAULT_MAPPING)
     parser.add_argument("--parent-page", help="대상 워크스페이스에서 생성할 상위 Notion 페이지 ID 또는 URL")
@@ -1901,8 +2367,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--travelers", type=int, default=0, help="scaffold 여행 인원. 0이면 미정")
     parser.add_argument("--currency", default="미정", help="scaffold 기준 통화: KRW·JPY·USD·EUR·미정")
     parser.add_argument("--trip-name", help="scaffold 여행 페이지 제목")
-    parser.add_argument("--trip-id", help="shopping-save 대상 여행 페이지 ID")
+    parser.add_argument("--trip-id", help="저장 대상 여행 페이지 ID")
+    parser.add_argument("--part", help="part-save 입력 파트 이름")
+    parser.add_argument("--part-input", type=Path, help="part-save 승인된 정규화 행 JSON")
     parser.add_argument("--shopping-input", type=Path, help="shopping-save 승인된 쇼핑 행 JSON")
+    parser.add_argument("--traveler-input", type=Path, help="traveler-save에서 사용할 사람별 입력 JSON")
     parser.add_argument("--confirm", action="store_true", help="shopping-save 사용자 확인 완료")
     return parser
 
@@ -1943,6 +2412,48 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                 raise InstallerError("쇼핑 입력 JSON은 행 객체 배열이어야 합니다.")
             result = save_shopping_rows(manifest, client, args.mapping, args.trip_id, rows, confirmed=True)
+            print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
+            return 0
+        if args.command == "part-save":
+            if not args.trip_id:
+                raise InstallerError("part-save에는 --trip-id가 필요합니다.")
+            if not args.part:
+                raise InstallerError("part-save에는 --part가 필요합니다.")
+            if not args.part_input:
+                raise InstallerError("part-save에는 --part-input JSON 파일이 필요합니다.")
+            if not args.confirm:
+                raise InstallerError("파트 입력을 저장하기 전에 --confirm 승인이 필요합니다.")
+            try:
+                loaded = json.loads(args.part_input.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                raise InstallerError(f"파트 입력 JSON을 읽지 못했습니다: {args.part_input}") from exc
+            rows = loaded.get("rows", loaded.get("입력", loaded)) if isinstance(loaded, dict) else loaded
+            if isinstance(rows, dict):
+                rows = [rows]
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise InstallerError("파트 입력 JSON은 행 객체 배열이어야 합니다.")
+            result = save_part_rows(manifest, client, args.mapping, args.trip_id,
+                                    args.part, rows, confirmed=True)
+            print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
+            return 0
+        if args.command == "traveler-save":
+            if not args.trip_id:
+                raise InstallerError("traveler-save에는 --trip-id가 필요합니다.")
+            if not args.traveler_input:
+                raise InstallerError("traveler-save에는 --traveler-input JSON 파일이 필요합니다.")
+            if not args.confirm:
+                raise InstallerError("동행자 입력을 저장하기 전에 --confirm 승인이 필요합니다.")
+            try:
+                loaded = json.loads(args.traveler_input.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                raise InstallerError(f"동행자 입력 JSON을 읽지 못했습니다: {args.traveler_input}") from exc
+            profiles = loaded.get("profiles", loaded.get("동행자", loaded)) if isinstance(loaded, dict) else loaded
+            if isinstance(profiles, dict):
+                profiles = [profiles]
+            if not isinstance(profiles, list) or any(not isinstance(row, dict) for row in profiles):
+                raise InstallerError("동행자 입력 JSON은 행 객체 배열이어야 합니다.")
+            result = save_traveler_profiles(manifest, client, args.mapping, args.trip_id,
+                                            profiles, confirmed=True)
             print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
             return 0
         if args.command == "scaffold":

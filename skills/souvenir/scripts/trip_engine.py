@@ -28,6 +28,316 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 URL_RE = re.compile(r"https?://[^\s|]+", re.I)
 SHORT_MAP_HOSTS = {"maps.app.goo.gl", "goo.gl"}
 SHOPPING_REQUIRED_FIELDS = ("구매 장소", "수량", "예상 금액")
+INPUT_UNKNOWN = "미정"
+
+# 대화에서 받은 값과 Notion 속성 사이의 단일 계약이다.  호스트는 이
+# 목록을 먼저 사용자에게 보여주고, 답변은 아래 ``property`` 이름으로
+# 분리해 저장해야 한다.  특히 사람별 정보는 ``의견·요청`` 같은 합친
+# 열을 사용하지 않는다.
+INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
+    "trip": {
+        "label": "기본 여행 정보",
+        "databases": ["trip"],
+        "fields": [
+            {"name": "여행지", "property": "목적지", "required": True},
+            {"name": "출발일", "property": "출발일", "required": False},
+            {"name": "종료일", "property": "종료일", "required": False},
+            {"name": "여행 기간(일)", "property": "기간(일)", "required": False},
+            {"name": "인원 수", "property": "인원", "required": False},
+            {"name": "기준 통화", "property": "기준 통화", "required": False},
+            {"name": "여행 템포", "property": "여행 템포", "required": False},
+            {"name": "여행 테마", "property": "여행 테마", "required": False},
+            {"name": "가장 중요한 기준", "property": "가장 중요한 기준", "required": False},
+            {"name": "메모", "property": "메모", "required": False},
+        ],
+    },
+    "traveler": {
+        "label": "여행 개요·취향 (사람별)",
+        "databases": ["traveler"],
+        "fields": [
+            {"name": "이름", "property": "여행자", "required": True},
+            {"name": "역할", "property": "역할", "required": True},
+            {"name": "먹고 싶은 음식", "property": "먹고 싶은 음식", "required": True},
+            {"name": "선호 이동", "property": "선호 이동", "required": True},
+            {"name": "숙소 취향", "property": "숙소 취향", "required": True},
+            {"name": "주의사항", "property": "주의사항", "required": True},
+            {"name": "추가 요청", "property": "추가 요청", "required": True},
+            {"name": "담당 영역", "property": "담당 영역", "required": False},
+            {"name": "개인 예산", "property": "개인 예산", "required": False},
+            {"name": "예산 통화", "property": "예산 통화", "required": False},
+            {"name": "메모", "property": "메모", "required": False},
+        ],
+    },
+    "itinerary": {
+        "label": "날짜별 일정",
+        "databases": ["itinerary"],
+        "fields": [
+            {"name": "일정명", "property": "일정", "required": True},
+            {"name": "일차", "property": "일차", "required": True},
+            {"name": "날짜", "property": "날짜", "required": False},
+            {"name": "시작 시각", "property": "시작", "required": False},
+            {"name": "종료 시각", "property": "종료", "required": False},
+            {"name": "장소", "property": "장소", "required": False},
+            {"name": "예약·메모", "property": "예약·메모", "required": False},
+            {"name": "활동 상태", "property": "상태", "required": False},
+            {"name": "플랜 B", "property": "플랜 B", "required": False},
+            {"name": "플랜 C", "property": "플랜 C", "required": False},
+        ],
+    },
+    "air": {
+        "label": "항공",
+        "databases": ["long_transport", "reservation"],
+        "fields": [
+            {"name": "구간", "property": "구간", "required": True},
+            {"name": "출발 공항", "property": "출발 공항", "required": True},
+            {"name": "도착 공항", "property": "도착 공항", "required": True},
+            {"name": "운항사", "property": "운항사", "required": False},
+            {"name": "편명", "property": "편명", "required": False},
+            {"name": "출발 일시", "property": "출발", "required": False},
+            {"name": "도착 일시", "property": "도착", "required": False},
+            {"name": "선호 시간대", "property": "선호 시간대", "required": False},
+            {"name": "항공권 예산(KRW)", "property": "항공권 예산", "required": False},
+            {"name": "후보 상태", "property": "후보 상태", "required": False},
+            {"name": "예약 상태", "property": "예약 상태", "required": False},
+            {"name": "예약번호", "property": "예약번호", "required": False},
+            {"name": "확인 링크", "property": "확인 링크", "required": False},
+            {"name": "좌석·수하물", "property": "좌석·수하물", "required": False},
+            {"name": "체크인·탑승 마감", "property": "체크인·탑승 마감", "required": False},
+        ],
+    },
+    "stay": {
+        "label": "숙소",
+        "databases": ["stay", "reservation"],
+        "fields": [
+            {"name": "숙소명", "property": "숙소", "required": True},
+            {"name": "주소", "property": "주소", "required": False},
+            {"name": "숙소 링크", "property": "숙소 링크", "required": False},
+            {"name": "체크인", "property": "체크인", "required": False},
+            {"name": "체크아웃", "property": "체크아웃", "required": False},
+            {"name": "장점", "property": "장점", "required": False},
+            {"name": "단점", "property": "단점", "required": False},
+            {"name": "1박 비용(KRW)", "property": "1박 비용", "required": False},
+            {"name": "숙박 총액(KRW)", "property": "총액", "required": False},
+            {"name": "예약번호", "property": "예약번호", "required": False},
+            {"name": "지도 URL", "property": "지도 URL", "required": False},
+        ],
+    },
+    "place": {
+        "label": "장소 보관함",
+        "databases": ["place"],
+        "fields": [
+            {"name": "장소명", "property": "장소", "required": True},
+            {"name": "지역", "property": "지역", "required": False},
+            {"name": "종류", "property": "종류", "required": False},
+            {"name": "지도 URL", "property": "지도 URL", "required": False},
+            {"name": "공식 링크", "property": "공식 링크", "required": False},
+            {"name": "사진 URL", "property": "사진 URL", "required": False},
+            {"name": "예산 메모", "property": "예산 메모", "required": False},
+            {"name": "영업시간·휴무", "property": "영업시간·휴무", "required": False},
+            {"name": "출처", "property": "출처", "required": False},
+            {"name": "개인 평점", "property": "개인 평점", "required": False},
+            {"name": "방문 완료", "property": "방문 완료", "required": False},
+            {"name": "메모", "property": "메모", "required": False},
+        ],
+    },
+    "shopping": {
+        "label": "쇼핑",
+        "databases": ["shopping", "expense"],
+        "fields": [
+            {"name": "품목명", "property": "품목", "required": True},
+            {"name": "담당 여행자", "property": "담당 여행자", "required": False},
+            {"name": "구매 장소", "property": "구매 장소", "required": True},
+            {"name": "수량", "property": "수량", "required": True},
+            {"name": "예상 금액", "property": "예상 금액", "required": True},
+            {"name": "통화", "property": "통화", "required": False},
+            {"name": "사진 URL", "property": "사진 URL", "required": False},
+            {"name": "태그", "property": "태그", "required": False},
+            {"name": "결제 수단", "property": "결제 수단", "required": False},
+            {"name": "상태", "property": "상태", "required": False},
+            {"name": "링크·메모", "property": "링크·메모", "required": False},
+        ],
+    },
+    "budget": {
+        "label": "예산·여행 지갑",
+        "databases": ["wallet", "budget", "expense", "split", "settlement"],
+        "fields": [
+            {"name": "지갑 이름", "property": "지갑", "required": True},
+            {"name": "통화", "property": "통화", "required": True},
+            {"name": "준비 금액", "property": "준비 금액", "required": True},
+            {"name": "사용처", "property": "사용처", "required": False},
+            {"name": "거래 유형", "property": "거래 유형", "required": False},
+            {"name": "결제 단계", "property": "결제 단계", "required": False},
+            {"name": "결제 수단", "property": "결제 수단", "required": False},
+            {"name": "실제 사용 금액", "property": "금액", "required": False},
+            {"name": "예산 카테고리", "property": "카테고리", "required": False},
+            {"name": "예산 범위", "property": "예산 범위", "required": False},
+            {"name": "담당 여행자", "property": "결제자", "required": False},
+        ],
+    },
+    "preparation": {
+        "label": "준비물·준비할 일",
+        "databases": ["task", "packing"],
+        "fields": [
+            {"name": "항목", "property": "할 일", "required": True},
+            {"name": "시점", "property": "시점", "required": False},
+            {"name": "상태", "property": "상태", "required": False},
+            {"name": "중요도", "property": "중요도", "required": False},
+            {"name": "담당자", "property": "담당자", "required": False},
+            {"name": "기한", "property": "기한", "required": False},
+            {"name": "공용·개인", "property": "공용·개인", "required": False},
+            {"name": "분류", "property": "분류", "required": False},
+            {"name": "필수", "property": "필수", "required": False},
+            {"name": "수량", "property": "수량", "required": False},
+            {"name": "구매 필요", "property": "구매 필요", "required": False},
+        ],
+    },
+}
+
+PART_ALIASES = {
+    "기본 정보": "trip", "기본 여행 정보": "trip", "여행 정보": "trip", "여행": "trip", "여행 개요": "traveler",
+    "여행 개요·취향": "traveler", "취향": "traveler", "동행자": "traveler",
+    "일정": "itinerary", "날짜별 일정": "itinerary", "항공": "air",
+    "항공편": "air", "숙소": "stay", "숙소 후보": "stay", "장소": "place",
+    "장소 보관함": "place", "쇼핑": "shopping", "예산": "budget",
+    "여행 지갑": "budget", "예산·여행 지갑": "budget", "준비물": "preparation",
+    "준비할 일": "preparation", "준비물·준비할 일": "preparation",
+}
+
+
+def input_fields_for(part: str) -> Dict[str, Any]:
+    """Return the explicit question/storage contract for one plan part."""
+    key = PART_ALIASES.get(text(part), text(part).strip().lower())
+    if key not in INPUT_CONTRACTS:
+        raise ValueError(f"알 수 없는 입력 파트입니다: {part}")
+    contract = INPUT_CONTRACTS[key]
+    return json.loads(json.dumps({"part": key, **contract}, ensure_ascii=False))
+
+
+def _input_value(row: Dict[str, Any], field: Dict[str, Any]) -> Any:
+    property_name = field["property"]
+    aliases = (field["name"], property_name)
+    for alias in aliases:
+        if alias in row and row[alias] not in (None, ""):
+            return row[alias]
+    return None
+
+
+def _canonical_input_row(part: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    contract = input_fields_for(part)
+    result: Dict[str, Any] = {}
+    for field in contract["fields"]:
+        raw = _input_value(row, field)
+        if raw not in (None, ""):
+            result[field["property"]] = raw
+    # The title is a Notion title property, so preserve it under its exact
+    # schema name instead of hiding it in a generic note.
+    if part == "traveler" and "여행자" not in result and row.get("이름"):
+        result["여행자"] = row["이름"]
+    return result
+
+
+def parse_traveler_profiles(content: Any, traveler_names: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Parse person-by-person answers into independent Notion properties.
+
+    Accepted text format is one person per line:
+    ``이름 | 역할 | 먹고 싶은 음식 | 선호 이동 | 숙소 취향 | 주의사항 | 추가 요청``.
+    Missing answers are kept as ``미정``.  A legacy combined ``의견·요청`` key
+    is rejected rather than silently mixing unrelated answers.
+    """
+    rows: List[Any]
+    if isinstance(content, str):
+        raw = content.strip()
+        if not raw:
+            return []
+        if raw[:1] in "[{":
+            try:
+                loaded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("동행자 입력 JSON을 읽지 못했습니다.") from exc
+            rows = loaded if isinstance(loaded, list) else [loaded]
+        else:
+            rows = [line.strip() for line in raw.splitlines() if line.strip()]
+    elif isinstance(content, dict):
+        rows = [content]
+    elif isinstance(content, (list, tuple)):
+        rows = list(content)
+    else:
+        raise ValueError("동행자 입력은 줄 목록, 객체, JSON 배열 중 하나여야 합니다.")
+
+    fields = INPUT_CONTRACTS["traveler"]["fields"][:7]
+    names = list(traveler_names)
+    parsed: List[Dict[str, Any]] = []
+    for index, item in enumerate(rows):
+        if isinstance(item, str):
+            pieces = [part.strip() for part in item.split("|")]
+            if index == 0 and pieces and pieces[0] in {field["name"] for field in fields}:
+                # Allow the copyable header line from the conversation prompt.
+                continue
+            row = {field["property"]: pieces[position]
+                   for position, field in enumerate(fields) if position < len(pieces) and pieces[position]}
+            if not row.get("여행자") and index < len(names):
+                row["여행자"] = names[index]
+        elif isinstance(item, dict):
+            if "의견·요청" in item:
+                raise ValueError("의견·요청은 자동 분해하지 않습니다. 역할·음식·이동·숙소·주의사항·추가 요청을 각각 입력하세요.")
+            row = _canonical_input_row("traveler", item)
+        else:
+            raise ValueError("동행자 각 입력은 문자열 또는 객체여야 합니다.")
+        if not row.get("여행자"):
+            row["여행자"] = names[index] if index < len(names) else f"동행자 {index + 1}"
+        for field in fields[1:]:
+            row.setdefault(field["property"], INPUT_UNKNOWN)
+        parsed.append(row)
+    return parsed
+
+
+def normalize_part_input(part: str, payload: Any, *, start_date: Optional[str] = None,
+                         duration_days: Optional[int] = None) -> Dict[str, Any]:
+    """Normalize one conversation answer and report its exact DB destination.
+
+    This function is intentionally write-free.  The host can show ``questions``
+    before asking, pass the answer here, then route each returned row to the
+    listed Notion database.  It prevents a combined chat answer from being
+    stored in an unrelated column.
+    """
+    key = input_fields_for(part)["part"]
+    contract = input_fields_for(key)
+    if key == "traveler":
+        rows = parse_traveler_profiles(payload)
+    elif key == "itinerary":
+        if isinstance(payload, str):
+            rows = organize_schedule(payload, start_date, duration_days)
+        elif isinstance(payload, dict):
+            rows = [_canonical_input_row(key, payload)]
+        elif isinstance(payload, (list, tuple)):
+            rows = [_canonical_input_row(key, item) for item in payload if isinstance(item, dict)]
+        else:
+            raise ValueError("일정 입력은 텍스트 또는 행 객체 목록이어야 합니다.")
+    elif key == "place":
+        rows = parse_place_lines(payload) if isinstance(payload, str) else [
+            _canonical_input_row(key, item) for item in payload if isinstance(item, dict)
+        ]
+    elif key == "shopping":
+        rows = parse_shopping_lines(payload) if isinstance(payload, str) else [
+            _canonical_input_row(key, item) for item in payload if isinstance(item, dict)
+        ]
+    elif isinstance(payload, dict):
+        rows = [_canonical_input_row(key, payload)]
+    elif isinstance(payload, (list, tuple)):
+        rows = [_canonical_input_row(key, item) for item in payload if isinstance(item, dict)]
+    else:
+        raise ValueError(f"{contract['label']} 입력은 필드별 객체 또는 객체 목록이어야 합니다.")
+    required_properties = [field["property"] for field in contract["fields"] if field.get("required")]
+    missing = sorted({field for row in rows for field in required_properties if row.get(field) in (None, "")})
+    return {
+        "part": key,
+        "label": contract["label"],
+        "databases": contract["databases"],
+        "questions": [field["name"] for field in contract["fields"]],
+        "rows": rows,
+        "missing": missing,
+        "status": "확인 필요" if missing else "입력 완료",
+    }
 
 ALIASES = {
     "title": ("title", "이름", "일정", "예약", "숙소", "내역", "장소", "항공편", "자료", "지갑", "여행자", "분담", "송금", "할 일", "준비물", "예산 항목", "서비스", "이동 구간", "결정", "날씨 확인", "검사", "품목"),
@@ -1057,7 +1367,7 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Souvenir Python travel engine")
-    parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh", "shopping", "places"])
+    parser.add_argument("command", choices=["check", "budget", "organize", "import", "refresh", "shopping", "places", "fields"])
     parser.add_argument("--input", type=Path, help="JSON 스냅샷 또는 가져올 파일")
     parser.add_argument("--kind", choices=["auto", "itinerary", "place", "shopping", "link", "csv", "json", "ics", "expense"], default="auto")
     parser.add_argument("--text", help="organize/import에서 직접 받을 텍스트")
@@ -1078,6 +1388,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-currency", help="예산 계산 기준 통화")
     parser.add_argument("--rate", action="append", default=[], help="환율 예: JPY=0.009")
     parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--part", help="fields에서 표시할 입력 파트 이름")
     return parser
 
 
@@ -1114,7 +1425,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         rates = parse_rates(args.rate)
-        if args.command == "places":
+        if args.command == "fields":
+            if args.part:
+                result = input_fields_for(args.part)
+            else:
+                result = {key: input_fields_for(key) for key in INPUT_CONTRACTS}
+        elif args.command == "places":
             if args.text is not None:
                 content = args.text
             elif args.input:

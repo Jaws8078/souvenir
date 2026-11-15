@@ -16,6 +16,39 @@ SPEC.loader.exec_module(engine)
 
 
 class TripEngineTests(unittest.TestCase):
+    def test_input_contract_lists_every_person_field_separately(self):
+        contract = engine.input_fields_for("여행 개요·취향")
+        self.assertEqual(contract["databases"], ["traveler"])
+        self.assertEqual(
+            [field["property"] for field in contract["fields"][:7]],
+            ["여행자", "역할", "먹고 싶은 음식", "선호 이동", "숙소 취향", "주의사항", "추가 요청"],
+        )
+        self.assertNotIn("의견·요청", [field["property"] for field in contract["fields"]])
+
+    def test_traveler_profiles_are_split_and_missing_values_are_explicit(self):
+        rows = engine.parse_traveler_profiles(
+            "유성 | 총괄 | 라멘 | 지하철 | 역 근처 | 견과류 알레르기 | 늦은 밤 일정 제외\n"
+            "민수 | | 스시 | | | |"
+        )
+        self.assertEqual(rows[0]["역할"], "총괄")
+        self.assertEqual(rows[0]["추가 요청"], "늦은 밤 일정 제외")
+        self.assertEqual(rows[1]["역할"], "미정")
+        self.assertEqual(rows[1]["선호 이동"], "미정")
+        self.assertNotIn("의견·요청", rows[0])
+
+    def test_combined_legacy_person_field_is_not_silently_saved(self):
+        with self.assertRaisesRegex(ValueError, "의견·요청"):
+            engine.parse_traveler_profiles([{"이름": "유성", "의견·요청": "총괄, 라멘"}])
+
+    def test_normalize_part_input_reports_target_databases_and_missing_fields(self):
+        packet = engine.normalize_part_input(
+            "항공",
+            {"구간": "가는 편", "출발 공항": "ICN", "도착 공항": "FUK", "항공권 예산": 300000},
+        )
+        self.assertEqual(packet["databases"], ["long_transport", "reservation"])
+        self.assertEqual(packet["rows"][0]["항공권 예산"], 300000)
+        self.assertEqual(packet["status"], "입력 완료")
+
     def test_organize_schedule_assigns_days_dates_and_times(self):
         rows = engine.organize_schedule(
             "1일차: 공항 도착 | 14:00-16:00 | 공항 | 체크인\n"
