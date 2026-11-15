@@ -7,7 +7,7 @@
 대화가 이어지는 동안 아래 상태를 유지한다. Notion에는 비밀번호·쿠키·토큰을 저장하지 않는다.
 
 ```text
-setup: notion_connection(unknown|connected|needs_user_action|unavailable) → account → workspace_id, workspace_name, workspace_confirmed → skill_active → login → template_status(unknown|found|needs_duplicate|confirmed|blocked) → template_source_url, template_page_id, template_page_url, template_confirmed
+setup: notion_connection(unknown|connected|needs_user_action|unavailable) → account → workspace_id, workspace_name, workspace_confirmed → skill_active → login → template_status(unknown|found|needs_duplicate|duplicate_consent_pending|native_in_progress|browser_in_progress|manual_duplicate_wait|validating|confirmed|blocked) → template_source_url, template_page_id, template_page_url, template_confirmed
 trip: trip_id, destination, start_date, end_date, duration_days,
       traveler_count, base_currency
 plan: selected_parts, current_part, completed_parts
@@ -19,7 +19,7 @@ plan: selected_parts, current_part, completed_parts
 
 ## 고정 템플릿 선행 검사
 
-워크스페이스 확인 직후 작업 메뉴보다 먼저 [고정 템플릿 게이트](template-gate.md)를 실행한다. 기준 설정의 링크·허용 제목·필수 섹션과 현재 워크스페이스의 유효한 설치 기록을 대조한다. 일치하는 복제본이 있으면 `template_status=confirmed`로 바꾸고 그 페이지의 구조·뷰·수식을 그대로 재사용한다. 없으면 기준 링크를 보여주고 사용자가 Notion에서 `복제`를 누를 때까지 `needs_duplicate`에서 대기한다. 복제 후 실제 페이지 URL·ID·필수 섹션을 다시 확인하기 전에는 여행 행·일정·예산·예약을 만들지 않는다. 링크가 막혔거나 검사가 실패하면 `blocked`로 멈추며 청사진·다른 템플릿·빈 페이지로 우회하지 않는다.
+워크스페이스 확인 직후 작업 메뉴보다 먼저 [고정 템플릿 게이트](template-gate.md)를 실행한다. 기준 설정의 링크·허용 제목·필수 섹션과 현재 워크스페이스의 유효한 설치 기록을 대조한다. 일치하는 복제본이 있으면 `template_status=confirmed`로 바꾸고 그 페이지의 구조·뷰·수식을 그대로 재사용한다. 없으면 먼저 복제 허락을 한 번 받고, CUA가 있으면 `browser_in_progress`, 네이티브 복제만 가능하면 `native_in_progress`, 둘 다 없으면 `manual_duplicate_wait`로 전환한다. 복제 후 실제 페이지 URL·ID·필수 섹션을 다시 확인하기 전에는 여행 행·일정·예산·예약을 만들지 않는다. 링크가 막혔거나 검사가 실패하면 `blocked`로 멈추며 청사진·다른 템플릿·빈 페이지로 우회하지 않는다.
 
 ## 시작 질문
 

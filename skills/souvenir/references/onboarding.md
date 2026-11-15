@@ -70,10 +70,11 @@ Codex CLI가 없는 경우에는 설치 명령을 대신 실행했다고 말하�
 
 유효한 기록이 없으면 다음을 한 번만 묻는다.
 
-> 이 워크스페이스에서 제공된 Souvenir 템플릿을 확인할 수 없습니다. 기준 링크를 열어 Notion에서 **복제**한 뒤 진행할까요?
+> 이 워크스페이스에서 제공된 Souvenir 템플릿을 확인할 수 없습니다. 기준 링크를 열어 이 워크스페이스에 **복제**하고 구조까지 검증한 뒤 진행할까요?
 
-- 사용자가 승인하면 [`template-source.json`](../assets/template-source.json)의 링크만 보여준다. 복제는 사용자가 Notion에서 직접 누른다.
-- 사용자가 복제를 완료했다고 답하면 같은 워크스페이스에서 기준 제목·필수 섹션·실제 URL·ID를 재검사한다. 통과한 사본만 `template_status=confirmed`로 기록한다.
+- 사용자가 승인하면 [`template-source.json`](../assets/template-source.json)의 고정 링크만 사용한다. 호스트가 CUA 브라우저를 제공하면 링크를 열어 `Duplicate`를 누르고 대상 워크스페이스를 선택한다. CUA가 없으면 링크를 보여주고 사용자가 직접 복제한다.
+- CUA의 로그인·OAuth·MFA·CAPTCHA 단계는 사용자가 처리한다. CUA가 중단되거나 브라우저 제어를 제공하지 않으면 `manual_duplicate_wait`로 전환하고 사용자 클릭 경로를 유지한다.
+- 네이티브 또는 브라우저 복제가 끝났다고 답해도 같은 워크스페이스에서 기준 제목·필수 섹션·실제 URL·ID를 재검사한다. 통과한 사본만 `template_status=confirmed`로 기록한다.
 - 링크가 비공개이거나 복제 허용이 꺼져 있거나 구조 검사가 실패하면 `template_status=blocked`로 멈춘다. 청사진·코드 설치·빈 페이지로 대체하지 않는다.
 - 설치 기록은 `진행 중`으로 먼저 저장하고, 연결이 끝난 뒤 `완료`·`template_source=public_notion_link`·`template_source_url`·`template_page_id`·`template_workspace_id`를 기록한다. 중단되면 완료로 표시하지 말고 다음 실행에서 같은 게이트부터 재개한다.
 

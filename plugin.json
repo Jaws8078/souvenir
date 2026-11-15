@@ -22,7 +22,7 @@
       "interface": {
         "displayName": "Souvenir",
         "shortDescription": "Notion 여행 플래너",
-        "longDescription": "Notion 연결을 사용해 제공된 Souvenir 템플릿에서 여행 개요, 일정, 예약, 숙소, 예산, 동행자, 준비물과 자료를 한곳에서 관리합니다. 목적지와 기간만 입력해도 링크 템플릿의 복제본에서 시작하며, 사용자의 메모와 기존 예약을 보존하면서 부분 수정합니다.",
+        "longDescription": "Notion 연결을 사용해 제공된 Souvenir 템플릿에서 여행 개요, 일정, 예약, 숙소, 예산, 동행자, 준비물과 자료를 한곳에서 관리합니다. 고정 템플릿 복제본을 먼저 확인하고, 가능한 호스트에서는 브라우저 자동화로 복제를 시도한 뒤 구조를 검증합니다. 목적지와 기간만 입력해도 시작하며 사용자의 메모와 기존 예약을 보존하면서 부분 수정합니다.",
         "developerName": "Jaws8078",
         "category": "Productivity",
         "websiteURL": "https://github.com/Jaws8078/souvenir",

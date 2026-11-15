@@ -21,10 +21,16 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from trip_engine import configure_output, main as engine_main  # noqa: E402
+from template_gate import main as template_gate_main  # noqa: E402
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    # Template duplication is a host-facing workflow.  The local process only
+    # plans the next action and records host results; CUA/Notion tools perform
+    # the actual browser or native duplication outside this Python process.
+    if args and args[0] == "template-gate":
+        return template_gate_main(args[1:])
     if args == ["--status"]:
         print(
             json.dumps(
@@ -36,6 +42,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "coordinator": {
                         "configured": bool(os.environ.get("SOUVENIR_COORDINATOR_URL")),
                         "endpoint": os.environ.get("SOUVENIR_COORDINATOR_URL") or None,
+                    },
+                    "template_gate": {
+                        "entrypoint": str(SCRIPT_DIR / "template_gate.py"),
+                        "browser_actions": "host-provided",
                     },
                 },
                 ensure_ascii=False,

@@ -29,6 +29,7 @@ class PackageTests(unittest.TestCase):
                        extension["interface"]["composerIcon"]):
             self.assertTrue((ROOT / target).is_file())
         self.assertTrue((PACKAGE / "scripts" / "run_souvenir.py").is_file())
+        self.assertTrue((PACKAGE / "scripts" / "template_gate.py").is_file())
         self.assertTrue((PACKAGE / "scripts" / "coordinator.py").is_file())
         self.assertTrue((PACKAGE / "agents" / "openai.yaml").is_file())
         self.assertTrue((PACKAGE / "assets" / "souvenir-icon.png").is_file())
@@ -65,6 +66,10 @@ class PackageTests(unittest.TestCase):
         self.assertIn("고정 템플릿 게이트", skill)
         self.assertIn("다른 템플릿", gate)
         self.assertIn("needs_duplicate", gate)
+        self.assertIn("duplicate_consent_pending", gate)
+        self.assertIn("browser_in_progress", gate)
+        self.assertIn("manual_duplicate_wait", gate)
+        self.assertIn("CUA", gate)
         self.assertIn("template_status=blocked", onboarding)
         self.assertIn("청사진·코드 설치·빈 페이지로 대체하지 않는다", onboarding)
 
