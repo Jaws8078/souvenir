@@ -345,6 +345,46 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(second["created"], [])
         self.assertEqual(len(second["rows"]), 1)
 
+    def test_live_relation_scope_and_active_marker_make_rows_visible(self):
+        class RelationClient:
+            def __init__(self):
+                self.updated = []
+                self.queries = []
+                self.pages = {
+                    "row-1": {"id": "row-1", "properties": {
+                        "여행": {"relation": []}, "구분": {"select": None},
+                    }}
+                }
+
+            def get_database(self, database_id):
+                return {"id": database_id, "properties": {
+                    "여행": {"type": "relation"},
+                    "구분": {"type": "select"},
+                }}
+
+            def get_page(self, page_id):
+                return copy.deepcopy(self.pages.get(page_id, {"id": page_id, "properties": {}}))
+
+            def update_page_properties(self, page_id, properties, expected_last_edited_time=None):
+                self.updated.append((page_id, copy.deepcopy(properties)))
+                self.pages.setdefault(page_id, {"id": page_id, "properties": {}})["properties"].update(copy.deepcopy(properties))
+                return {"id": page_id, "properties": copy.deepcopy(self.pages[page_id]["properties"])}
+
+            def query_database(self, database_id, payload=None):
+                self.queries.append(payload)
+                return [{"id": "row-1", "properties": copy.deepcopy(self.pages["row-1"]["properties"])}]
+
+        client = RelationClient()
+        rows = ni._rows_for_trip(client, "traveler-db", "trip-1")
+        self.assertEqual(rows, [])
+        self.assertEqual(client.queries[-1]["filter"], {
+            "property": "여행", "relation": {"contains": "trip-1"},
+        })
+        ni._link_row_to_trip(client, "row-1", "traveler-db", "trip-1", {})
+        update = client.updated[-1][1]
+        self.assertEqual(update["여행"], {"relation": [{"id": "trip-1"}]})
+        self.assertEqual(update["구분"], {"select": {"name": "사용 중"}})
+
     def test_old_install_is_migrated_with_idempotency_property(self):
         self.install()
         mapping = ni.read_json(self.path)

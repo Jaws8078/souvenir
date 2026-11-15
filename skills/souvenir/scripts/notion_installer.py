@@ -910,18 +910,91 @@ def _shopping_row_key(trip_id: str, row: Dict[str, Any]) -> str:
     )
 
 
+def _live_database_schema(client: Any, database_id: str,
+                          cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Read the live copied-template schema, not only the fallback manifest.
+
+    The Marketplace template has relation/formula/select properties that are
+    intentionally omitted from the portable manifest.  Using the live schema
+    here lets writes use those properties so Notion's saved views can display
+    the rows immediately.
+    """
+    cache = cache if cache is not None else {}
+    key = f"__schema__:{database_id}"
+    if key in cache:
+        return cache[key]
+    getter = getattr(client, "get_database", None)
+    if not callable(getter):
+        cache[key] = {}
+        return cache[key]
+    try:
+        payload = getter(database_id)
+    except Exception:
+        payload = {}
+    properties = payload.get("properties", {}) if isinstance(payload, dict) else {}
+    cache[key] = properties if isinstance(properties, dict) else {}
+    return cache[key]
+
+
+def _trip_scope_filter(client: Any, database_id: str, trip_id: str,
+                       cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build a scope filter that matches either live relations or legacy keys."""
+    schema = _live_database_schema(client, database_id, cache)
+    relation = schema.get("여행") if isinstance(schema, dict) else None
+    if isinstance(relation, dict) and relation.get("type") == "relation":
+        return {"property": "여행", "relation": {"contains": trip_id}}
+    if "여행 키" in schema:
+        return {"property": "여행 키", "rich_text": {"equals": trip_id}}
+    return {}
+
+
+def _normalized_page_id(value: Any) -> str:
+    match = UUID_RE.search(str(value or ""))
+    return match.group(0).replace("-", "").lower() if match else ""
+
+
+def _relation_ids(properties: Dict[str, Any], name: str = "여행") -> set[str]:
+    prop = properties.get(name, {}) if isinstance(properties, dict) else {}
+    values = prop.get("relation", []) if isinstance(prop, dict) else []
+    if not isinstance(values, list):
+        return set()
+    return {
+        normalized
+        for item in values
+        if isinstance(item, dict)
+        for normalized in [_normalized_page_id(item.get("id") or item.get("url"))]
+        if normalized
+    }
+
+
+def _row_belongs_to_trip(row: Dict[str, Any], trip_id: str) -> bool:
+    properties = row.get("properties", {}) if isinstance(row, dict) else {}
+    wanted = _normalized_page_id(trip_id)
+    if wanted and wanted in _relation_ids(properties):
+        return True
+    return _plain_property_text(properties, "여행 키").strip() == str(trip_id).strip()
+
+
+def _rows_for_trip(client: Any, database_id: str, trip_id: str,
+                   cache: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    scope = _trip_scope_filter(client, database_id, trip_id, cache)
+    try:
+        rows = client.query_database(database_id, {"filter": scope} if scope else None)
+    except Exception:
+        # Some older copies reject relation filters even though the property is
+        # present.  A full read is safe because the final local guard is still
+        # applied before anything is returned to the caller.
+        rows = client.query_database(database_id)
+    return [row for row in rows if _row_belongs_to_trip(row, trip_id)]
+
+
 def _shopping_scope_filter(trip_id: str) -> Dict[str, Any]:
+    """Legacy helper kept for callers/tests that only have a trip key."""
     return {"property": "여행 키", "rich_text": {"equals": trip_id}}
 
 
 def _shopping_rows_for_trip(client: Any, database_id: str, trip_id: str) -> List[Dict[str, Any]]:
-    def value_text(value: Any) -> str:
-        return "" if value is None else str(value).strip()
-
-    rows = client.query_database(database_id, {"filter": _shopping_scope_filter(trip_id)})
-    allowed = {trip_id}
-    return [row for row in rows
-            if value_text(_plain_property_text(row.get("properties", {}), "여행 키")) in allowed]
+    return _rows_for_trip(client, database_id, trip_id)
 
 
 def save_shopping_rows(manifest: Dict[str, Any], client: NotionClient,
@@ -1063,11 +1136,7 @@ def _traveler_row_properties(manifest: Dict[str, Any], row: Dict[str, Any],
 
 
 def _traveler_rows_for_trip(client: Any, database_id: str, trip_id: str) -> List[Dict[str, Any]]:
-    rows = client.query_database(database_id, {
-        "filter": {"property": "여행 키", "rich_text": {"equals": trip_id}},
-    })
-    return [row for row in rows
-            if _plain_property_text(row.get("properties", {}), "여행 키") == trip_id]
+    return _rows_for_trip(client, database_id, trip_id)
 
 
 def save_traveler_profiles(manifest: Dict[str, Any], client: NotionClient,
@@ -1379,6 +1448,7 @@ def save_trip_fields(manifest: Dict[str, Any], client: NotionClient,
                     verify=lambda result: verify_updated(result, trip_id),
                     idempotency_key=stable_key("trip-update", trip_id, sorted(properties)),
                 )
+                _link_row_to_trip(client, trip_id, database_id, trip_id, {})
                 return {"status": "complete", "part": "trip", "trip_id": trip_id,
                         "updated": [trip_id], "created": [], "properties": sorted(properties)}
 
@@ -1487,9 +1557,7 @@ def save_part_rows(manifest: Dict[str, Any], client: NotionClient,
                     created.append(created_id)
                 for database_key in sorted(set(database_keys)):
                     database_id = mapping["databases"][database_key]
-                    scoped = client.query_database(database_id, {
-                        "filter": {"property": "여행 키", "rich_text": {"equals": trip_id}},
-                    })
+                    scoped = _rows_for_trip(client, database_id, trip_id)
                     visible_rows.extend(scoped)
                 return {
                     "status": "complete", "part": key, "trip_id": trip_id,
@@ -1518,18 +1586,43 @@ def _has_trip_relation(client: Any, database_id: str) -> bool:
 
 
 def _link_row_to_trip(client: Any, page_id: str, database_id: str,
-                      trip_id: str, relation_cache: Dict[str, bool]) -> None:
-    """Attach a row to its trip when the copied template supports relations."""
+                      trip_id: str, relation_cache: Dict[str, Any]) -> None:
+    """Attach and activate a row so the copied template's views show it.
+
+    Marketplace copies use both a ``여행`` relation and a ``구분`` select.  A
+    row can be successfully created yet remain invisible when either relation
+    or the ``사용 중`` marker is missing, so both are applied in one update.
+    Portable fallback databases simply skip the properties they do not have.
+    """
     if not page_id or not trip_id:
         return
-    if database_id not in relation_cache:
-        relation_cache[database_id] = _has_trip_relation(client, database_id)
-    if not relation_cache[database_id]:
-        return
+    schema = _live_database_schema(client, database_id, relation_cache)
+    relation = schema.get("여행") if isinstance(schema, dict) else None
+    has_relation = isinstance(relation, dict) and relation.get("type") == "relation"
+    relation_cache[database_id] = has_relation
+    updates: Dict[str, Any] = {}
+    if has_relation:
+        updates["여행"] = {"relation": [{"id": trip_id}]}
+    marker = schema.get("구분") if isinstance(schema, dict) else None
+    if isinstance(marker, dict) and marker.get("type") in {"select", "status"}:
+        current_marker = ""
+        getter = getattr(client, "get_page", None)
+        if callable(getter):
+            try:
+                current = getter(page_id)
+                current_marker = _select_property_name(
+                    current.get("properties", {}) if isinstance(current, dict) else {}, "구분"
+                )
+            except Exception:
+                current_marker = ""
+        if current_marker != "사용 중":
+            updates["구분"] = ({"status": {"name": "사용 중"}}
+                               if marker.get("type") == "status"
+                               else {"select": {"name": "사용 중"}})
     updater = getattr(client, "update_page_properties", None)
-    if not callable(updater):
+    if not updates or not callable(updater):
         return
-    updater(page_id, {"여행": {"relation": [{"id": trip_id}]}})
+    updater(page_id, updates)
 
 
 def ensure_idempotency_schema(mapping: Dict[str, Any], path: Path, client: Any) -> None:
@@ -2090,6 +2183,10 @@ def _scaffold_trip_unlocked(
                 verify=lambda created: verify_created(client, created),
                 idempotency_key=trip_key,
             )
+    # The live template filters active trip cards by ``구분 = 사용 중``.
+    # Apply that marker even when the portable manifest does not declare it.
+    _link_row_to_trip(client, result["trip_id"], mapping["databases"]["trip"],
+                      result["trip_id"], relation_cache)
     completed = {field: len(result[field]) for field in ("itinerary", "travelers", "tasks", "packing")}
     seen: Dict[str, int] = {}
     for key, field, row in rows:

@@ -325,6 +325,34 @@ class TripEngineTests(unittest.TestCase):
         self.assertNotIn("stale", {row["id"] for row in snapshot["itinerary"]})
         self.assertTrue(client.calls[0][1]["filter"])
 
+    def test_notion_snapshot_uses_live_trip_relation_when_key_is_missing(self):
+        class RelationSnapshotClient:
+            def __init__(self):
+                self.calls = []
+
+            def get_page(self, page_id):
+                return {"id": page_id, "properties": {
+                    "여행": {"type": "title", "title": [{"plain_text": "후쿠오카 여행"}]},
+                }}
+
+            def get_database(self, database_id):
+                return {"id": database_id, "properties": {"여행": {"type": "relation"}}}
+
+            def query_database(self, database_id, payload=None):
+                self.calls.append((database_id, payload))
+                return [{"id": "current", "properties": {
+                    "여행": {"type": "relation", "relation": [{"id": "11111111-1111-1111-1111-111111111111"}]},
+                }}]
+
+        client = RelationSnapshotClient()
+        snapshot = engine.load_notion_snapshot(
+            client, {"databases": {"itinerary": "itinerary-db"}}, "11111111-1111-1111-1111-111111111111", "check"
+        )
+        self.assertEqual(snapshot["itinerary"][0]["id"], "current")
+        self.assertEqual(client.calls[0][1]["filter"], {
+            "property": "여행", "relation": {"contains": "11111111-1111-1111-1111-111111111111"},
+        })
+
 
 class NotionClientExtensionTests(unittest.TestCase):
     def test_query_database_follows_cursor(self):

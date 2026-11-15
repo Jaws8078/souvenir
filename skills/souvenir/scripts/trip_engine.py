@@ -1293,6 +1293,9 @@ def notion_page_record(page: Dict[str, Any]) -> Dict[str, Any]:
             result[name] = prop.get("checkbox", False)
         elif kind == "url":
             result[name] = prop.get("url")
+        elif kind == "relation":
+            result[name] = [item.get("id") for item in prop.get("relation", [])
+                            if isinstance(item, dict) and item.get("id")]
         elif kind == "date":
             result[name] = (prop.get("date") or {}).get("start")
         elif kind == "formula":
@@ -1313,14 +1316,49 @@ def _trip_scope_filter(candidates: Sequence[str]) -> Dict[str, Any]:
     return clauses[0] if len(clauses) == 1 else {"or": clauses}
 
 
+def _normalize_page_id(value_: Any) -> str:
+    match = re.search(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}",
+                      text(value_), re.I)
+    return match.group(0).replace("-", "").lower() if match else ""
+
+
+def _scope_filter_for_database(client: Any, database_id: str,
+                               candidates: Sequence[str]) -> Dict[str, Any]:
+    """Prefer the live template's relation over its optional legacy key."""
+    getter = getattr(client, "get_database", None)
+    if callable(getter):
+        try:
+            database = getter(database_id)
+            properties = database.get("properties", {}) if isinstance(database, dict) else {}
+            relation = properties.get("여행") if isinstance(properties, dict) else None
+            if isinstance(relation, dict) and relation.get("type") == "relation":
+                trip_id = next((text(item) for item in candidates if text(item)), "")
+                if trip_id:
+                    return {"property": "여행", "relation": {"contains": trip_id}}
+        except Exception:
+            pass
+    return _trip_scope_filter(candidates)
+
+
+def _row_matches_trip(row: Dict[str, Any], candidates: Sequence[str]) -> bool:
+    wanted_ids = {_normalize_page_id(item) for item in candidates if _normalize_page_id(item)}
+    relation_ids = row.get("여행") if isinstance(row, dict) else None
+    if isinstance(relation_ids, list) and wanted_ids:
+        if any(_normalize_page_id(item) in wanted_ids for item in relation_ids):
+            return True
+    allowed = {text(item) for item in candidates if text(item)}
+    return text(value(row, "travel_key")) in allowed
+
+
 def load_notion_snapshot(client: Any, mapping: Dict[str, Any], trip_id: str,
                          command: Optional[str] = None) -> Dict[str, Any]:
     """Read only the current trip's DB rows needed by one command.
 
-    Older installations may not have a ``여행 키`` column yet.  In that case
-    we fall back to a full read for compatibility, but new installations use
-    the server-side filter so companion/shopping rows from another trip never
-    leak into the dashboard and refreshes do not scan every row.
+    Marketplace copies scope child rows through the live ``여행`` relation;
+    older portable installs use ``여행 키`` instead.  The server-side filter
+    is paired with a local guard so companion/shopping rows from another trip
+    never leak into the dashboard, even when a copied data source is missing a
+    property or rejects a relation filter.
     """
     trip_page = notion_page_record(client.get_page(trip_id))
     all_keys = {"itinerary": "itinerary", "reservation": "reservation", "stay": "stay",
@@ -1334,26 +1372,24 @@ def load_notion_snapshot(client: Any, mapping: Dict[str, Any], trip_id: str,
     }
     selected = needed_by_command.get(command, set(all_keys))
     candidates = [trip_id, text(trip_page.get("여행 키")), text(trip_page.get("여행")), text(trip_page.get("id"))]
-    scope_filter = _trip_scope_filter(candidates)
     snapshot: Dict[str, Any] = {"trip": trip_page}
     for output_key, database_key in all_keys.items():
         database_id = (mapping.get("databases") or {}).get(database_key)
         rows = []
         if output_key in selected and database_id:
+            scope_filter = _scope_filter_for_database(client, database_id, candidates)
             try:
                 payload = {"filter": scope_filter} if scope_filter else None
                 rows = [notion_page_record(page) for page in client.query_database(database_id, payload)]
-                # Notion's rich_text filter is exact.  Keep a final local
-                # guard because legacy title-based rows may match the query.
-                allowed = {text(item) for item in candidates if text(item)}
-                rows = [row for row in rows if text(value(row, "travel_key")) in allowed]
+                # Keep a final local guard because relation and legacy-key
+                # filters can both return rows from older copied templates.
+                rows = [row for row in rows if _row_matches_trip(row, candidates)]
             except Exception:
                 # A pre-scope database can reject the filter.  Reading it once
                 # is slower, but preserves compatibility while still applying
                 # the same local scope guard.
                 rows = [notion_page_record(page) for page in client.query_database(database_id)]
-                allowed = {text(item) for item in candidates if text(item)}
-                rows = [row for row in rows if text(value(row, "travel_key")) in allowed]
+                rows = [row for row in rows if _row_matches_trip(row, candidates)]
         snapshot[output_key] = rows
     return snapshot
 
