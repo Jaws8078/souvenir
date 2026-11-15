@@ -111,6 +111,15 @@ Souvenir: 검증 완료. 이제 여행 정보를 입력할 수 있습니다.
 연결된 계정과 워크스페이스를 사용자에게 보여주고 진행 확인을 받은 뒤에만
 아래 검사를 한다.
 
+### 검증 캐시
+
+성공한 검증은 `.souvenir-template-cache.json`에 워크스페이스 ID, 기준 템플릿
+계약 해시, 복제본 페이지 ID·URL, 확인 시각만 기록한다. 기본 24시간 동안 같은
+워크스페이스와 링크를 다시 실행하면 캐시를 사용해 후보 전체 검색을 생략하고,
+호스트가 복제본의 최소 존재 확인만 수행한다. TTL 만료, 기준 링크·필수 섹션
+변경, 검증 실패, `SOUVENIR_TEMPLATE_CACHE_TTL_SECONDS` 변경 시에는 아래 전체
+검사로 돌아간다. 개인 데이터·토큰·쿠키는 캐시에 저장하지 않는다.
+
 1. 정확한 제목의 `Souvenir · 설치 기록`만 읽는다. 기록의
    `template_source`가 `public_notion_link`이고 `template_source_url`이
    기준 링크와 같으며 `template_workspace_id`가 현재 워크스페이스와 같고,

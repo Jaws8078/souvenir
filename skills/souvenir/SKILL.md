@@ -108,7 +108,7 @@ Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽
 - 로컬 설치 스크립트는 `validate`/`plan` 또는 기본 점검으로 시작한다. 실제 등록·생성은 사용자가 요청한 범위에서 실행하고, 토큰은 채팅으로 받지 않는다. 설치 대상마다 별도 `--mapping`을 사용한다. 같은 파트에서 반복 조회하지 말고 필요한 DB만 한 번에 읽어 저장·검증해 반영 지연을 줄인다.
 - 여러 Souvenir 세션이 같은 워크스페이스를 쓸 때는 한 번에 하나의 쓰기 작업만 진행한다. fallback 설치기는 매핑·상위 페이지 잠금을 자동으로 잡고, 잠금이 있으면 중복 생성 없이 중단한다. 플러그인으로 직접 쓰는 경우에도 여행별 단일 작성자 규칙을 적용한다.
 - fallback 설치·여행 생성은 `Souvenir · 작업 기록` DB에 여행별 lease를 기록한다. `반영 중` lease가 있으면 같은 여행의 다른 쓰기를 중단하고, 만료된 lease는 `확인 필요`로 남긴 뒤 새 작업을 시작한다. Notion API 조회·생성 사이의 경쟁을 완전히 원자화할 수 없으므로 lease는 조정용이며, claim 직후 소유권을 다시 확인한다. 직접 플러그인 쓰기에서도 작업 종류·작성자·대상·만료를 먼저 확인하고, 같은 필드는 낙관적 버전 충돌로 중단한다.
-- `SOUVENIR_COORDINATOR_URL`이 설정된 환경에서는 P2 coordinator lease를 먼저 획득한다. coordinator가 workspace·여행별 단일 writer, heartbeat 만료, queue 순서, 멱등 키와 보상 이벤트를 관리한다. 연결 실패 시 P1로 조용히 전환하지 않고 쓰기를 중단한다. coordinator는 Notion 데이터 원본이 아니므로 최종 변경은 항상 Notion에서 다시 읽고 검증한다.
+- `SOUVENIR_COORDINATOR_MODE=always` 또는 `SOUVENIR_EXPECT_CONCURRENT=1`로 활성화된 환경에서는 P2 coordinator lease를 먼저 획득한다. 기본 `auto` 단일 작성자 실행은 coordinator 왕복을 생략한다. 활성화된 coordinator가 workspace·여행별 단일 writer, heartbeat 만료, queue 순서, 멱등 키와 보상 이벤트를 관리하며 연결 실패 시 P1로 조용히 전환하지 않고 쓰기를 중단한다. coordinator는 Notion 데이터 원본이 아니므로 최종 변경은 항상 Notion에서 다시 읽고 검증한다.
 - 행을 새로 만들 때는 `Souvenir 작업 키`를 기준으로 먼저 검색하고, 같은 키가 있으면 재사용한다. 같은 키가 여러 개면 임의로 고르지 않고 충돌로 중단한다.
 - 수정은 저장 직전에 대상 페이지를 다시 읽고, 처음 읽은 버전과 달라졌으면 오래된 변경안을 저장하지 않는다. 저장 후에도 결과를 다시 읽어 확인하며, 저장 여부가 불명확한 쓰기는 `pending_operation`을 남기고 재전송하지 않는다.
 

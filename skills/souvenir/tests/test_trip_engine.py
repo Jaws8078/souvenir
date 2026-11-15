@@ -182,6 +182,21 @@ class TripEngineTests(unittest.TestCase):
             self.assertEqual(row["추가 확인"], ["장소명"])
             self.assertNotEqual(row["장소"], "maps.app.goo.gl")
 
+    def test_external_place_lookup_can_be_deferred_from_core_parse(self):
+        short_url = "https://maps.app.goo.gl/slow"
+        with patch.object(engine, "_resolve_short_map_url", side_effect=AssertionError("must be deferred")):
+            packet = engine.prepare_place_confirmation(
+                short_url, "후쿠오카", defer_external=True
+            )
+        self.assertTrue(packet["외부 조회 분리"])
+        self.assertEqual(packet["외부 조회"][0]["kind"], "place_lookup")
+        self.assertEqual(packet["상태"] if "상태" in packet else packet["검토 필요"][0]["정보 상태"], "외부 확인 대기")
+
+    def test_external_shopping_lookup_returns_job_without_search(self):
+        packet = engine.prepare_shopping_research("유자 킷캣", "후쿠오카", defer_external=True)
+        self.assertEqual(packet["상태"], "외부 확인 대기")
+        self.assertEqual(packet["외부 조회"][0]["kind"], "shopping_lookup")
+
     def test_place_confirmation_holds_unknown_or_mismatched_destinations(self):
         packet = engine.prepare_place_confirmation(
             "오호리 공원 | 후쿠오카 | 관광 | https://maps.google.com/?query=Ohori\n"

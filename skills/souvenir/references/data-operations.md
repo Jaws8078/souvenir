@@ -36,6 +36,16 @@ Notion 연결이 확인되면 먼저 [고정 템플릿 게이트](template-gate.
 
 각 일괄 작업은 `pending_operations`에 행별 멱등 키를 기록한다. 일부 요청이 불확실하게 끝나도 완료된 행과 확인이 필요한 행을 구분할 수 있으며, 중복 생성을 막기 위해 확인 없이 재전송하지 않는다. 저장 결과에는 토큰·본문 없이 요청 수·재시도 수·단계별 소요 시간만 `performance`로 포함할 수 있다. 이 최적화는 검증을 제거하는 것이 아니라 행별 검증을 파트별 최종 검증으로 묶는 방식이다.
 
+### 외부 조회·템플릿·전송 최적화
+
+장소 링크 해석과 쇼핑 후보 검색은 핵심 저장 경로에서 분리한다. 입력 파서는 짧은 시간 안에 원문과 `외부 조회 필요` 작업만 만들고, 호스트가 웹·지도·이미지 도구로 근거를 모은 뒤 사용자 확인을 받아 저장한다. `run_souvenir.py places|shopping --defer-external`은 이 대기 패킷을 반환하며, 근거 없는 후보는 장소·쇼핑 DB에 쓰지 않는다.
+
+고정 템플릿 게이트는 워크스페이스 ID와 템플릿 계약 해시를 키로 검증된 사본의 ID·URL·확인 시각만 `.souvenir-template-cache.json`에 보관한다. 기본 TTL은 24시간이며, 개인 페이지 내용·토큰·쿠키는 저장하지 않는다. 캐시가 만료되거나 링크 계약이 바뀌면 전체 구조 검사를 다시 한다.
+
+fallback `NotionClient`는 기본 urllib 전송을 유지해 호환성을 보장하고, `SOUVENIR_HTTP_TRANSPORT=keepalive`에서 persistent opener를 사용한다. 재시도 횟수·타임아웃·요청 간격은 `SOUVENIR_HTTP_MAX_RETRIES`, `SOUVENIR_HTTP_TIMEOUT`, `SOUVENIR_REQUEST_SPACING`으로 조절한다.
+
+P2 coordinator는 `SOUVENIR_COORDINATOR_MODE=auto`가 기본이다. `SOUVENIR_EXPECT_CONCURRENT=1` 또는 `always`일 때만 lease를 요청하며, 단일 작성자 실행에서는 불필요한 중앙 왕복을 만들지 않는다. coordinator를 사용하기로 한 실행에서 연결이 실패하면 P1로 몰래 전환하지 않고 중단한다.
+
 네이티브 복제에 성공하면 원본의 블록·컬럼·커버·데이터베이스 뷰를 보존한 뒤, 대상 워크스페이스의 새 데이터베이스 관계와 설치 기록만 연결한다. 다른 워크스페이스에서 사용자가 직접 복제한 경우에는 `manual_duplicate`로 기록하고 새 사본의 실제 URL·ID를 기준으로 연결한다. 일반 실행에서는 청사진 재구성을 수행하지 않는다. 복제 결과와 사본의 실제 URL·ID를 설치 완료 메시지에 한 줄로 표시한다.
 
 ### 링크 배포와 코드 재구축

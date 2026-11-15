@@ -3,6 +3,7 @@
 
 # Local Notion installer state and secrets
 .souvenir-install*.json
+.souvenir-template-cache.json
 ..souvenir-install*.json.*
 .souvenir-install*.lock
 .souvenir-workspace-*.lock

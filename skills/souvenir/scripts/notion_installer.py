@@ -124,10 +124,39 @@ def _coordinator_client() -> Optional[CoordinatorClient]:
     return CoordinatorClient(endpoint, os.environ.get("SOUVENIR_COORDINATOR_TOKEN"))
 
 
+def coordinator_mode() -> str:
+    """Return the coordinator policy without exposing credentials.
+
+    ``auto`` keeps the normal single-writer path fast.  A configured endpoint
+    is used only when the host explicitly declares that another writer may be
+    active; ``always`` is available for deployments that know they are shared.
+    """
+    mode = os.environ.get("SOUVENIR_COORDINATOR_MODE", "auto").strip().lower()
+    return mode if mode in {"auto", "always", "never"} else "auto"
+
+
+def coordinator_enabled() -> bool:
+    endpoint = bool(os.environ.get("SOUVENIR_COORDINATOR_URL", "").strip())
+    if not endpoint or coordinator_mode() == "never":
+        return False
+    if coordinator_mode() == "always":
+        return True
+    hint = os.environ.get("SOUVENIR_EXPECT_CONCURRENT", "").strip().lower()
+    return hint in {"1", "true", "yes", "on"}
+
+
 @contextmanager
 def distributed_lease(workspace_key: str, trip_key: str, operation_type: str,
                       owner: str, target: str = "", request_key: Optional[str] = None) -> Any:
-    """Use P2 coordination when configured; fail closed if it is unavailable."""
+    """Use P2 coordination only when shared writers are expected.
+
+    ``always`` and an explicit ``SOUVENIR_EXPECT_CONCURRENT=1`` still fail
+    closed if the coordinator is unavailable.  The default ``auto`` mode
+    avoids a network round trip for the common single-writer case.
+    """
+    if not coordinator_enabled():
+        yield None
+        return
     client = _coordinator_client()
     if client is None:
         yield None
@@ -656,7 +685,28 @@ class NotionClient:
         self._souvenir_schema_cache: Dict[str, Dict[str, Any]] = {}
         self._rate_lock = threading.Lock()
         self._next_request_at = 0.0
-        self._request_spacing = 0.05
+        try:
+            spacing = float(os.environ.get("SOUVENIR_REQUEST_SPACING", "0.05"))
+        except ValueError:
+            spacing = 0.05
+        self._request_spacing = min(1.0, max(0.0, spacing))
+        try:
+            timeout = float(os.environ.get("SOUVENIR_HTTP_TIMEOUT", "30"))
+        except ValueError:
+            timeout = 30.0
+        self._http_timeout = min(120.0, max(5.0, timeout))
+        try:
+            retries = int(os.environ.get("SOUVENIR_HTTP_MAX_RETRIES", "3"))
+        except ValueError:
+            retries = 3
+        self._max_retries = min(3, max(0, retries))
+        # A persistent opener keeps authentication/header setup in one place
+        # and lets urllib reuse keep-alive connections when the runtime's
+        # handler supports them.  Tests and constrained hosts can retain the
+        # legacy global urlopen transport explicitly.
+        transport = os.environ.get("SOUVENIR_HTTP_TRANSPORT", "urllib").strip().lower()
+        self._http_transport = "keepalive" if transport in {"keepalive", "opener"} else "urllib"
+        self._opener = urllib.request.build_opener() if self._http_transport == "keepalive" else None
 
     def _wait_for_rate_slot(self) -> None:
         with self._rate_lock:
@@ -669,6 +719,12 @@ class NotionClient:
     def _defer_requests(self, delay: float) -> None:
         with self._rate_lock:
             self._next_request_at = max(self._next_request_at, time.monotonic() + max(0.0, delay))
+
+    def _open_request(self, request: urllib.request.Request):
+        opener = self._opener
+        if opener is not None:
+            return opener.open(request, timeout=self._http_timeout)
+        return urllib.request.urlopen(request, timeout=self._http_timeout)
 
     def request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -687,11 +743,11 @@ class NotionClient:
         started = time.perf_counter()
         attempts = 0
         try:
-            for attempt in range(4):
+            for attempt in range(self._max_retries + 1):
                 attempts += 1
                 self._wait_for_rate_slot()
                 try:
-                    with urllib.request.urlopen(request, timeout=30) as response:
+                    with self._open_request(request) as response:
                         raw = response.read().decode("utf-8")
                 except urllib.error.HTTPError as exc:
                     detail = exc.read().decode("utf-8", errors="replace")
@@ -717,7 +773,7 @@ class NotionClient:
                     if not math.isfinite(delay) or delay < 0:
                         delay = 2 ** attempt
                     # Do not retry early when the workspace asks for a longer pause.
-                    if retryable and attempt < 3 and delay <= 60:
+                    if retryable and attempt < self._max_retries and delay <= 60:
                         self._defer_requests(delay + random.uniform(0, 0.25))
                         continue
                     message = str(parsed.get("message", detail)).replace(self.token, "[redacted]")

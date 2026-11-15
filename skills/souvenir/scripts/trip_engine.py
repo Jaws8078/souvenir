@@ -496,7 +496,8 @@ def organize_schedule(content: str, start_date: Optional[str] = None,
 
 
 def parse_place_lines(content: str, *, resolve_short_links: bool = True,
-                      link_timeout: float = 8.0) -> List[Dict[str, Any]]:
+                      link_timeout: float = 8.0,
+                      defer_external: bool = False) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for line in re.split(r"[\r\n]+", content):
         cleaned = line.strip(" -*\t")
@@ -504,8 +505,14 @@ def parse_place_lines(content: str, *, resolve_short_links: bool = True,
             continue
         fields = [part.strip() for part in re.split(r"\s*\|\s*", cleaned)]
         urls = URL_RE.findall(cleaned)
-        link_info = normalize_link(urls[0], resolve_short_links=resolve_short_links,
-                                   timeout=link_timeout) if urls else None
+        link_info = normalize_link(
+            urls[0],
+            # Core parsing never needs to wait for a redirect.  Hosts can run
+            # the external Maps/search enrichment as a separate, consented
+            # phase and feed the evidence back to ``prepare_place_confirmation``.
+            resolve_short_links=(resolve_short_links and not defer_external),
+            timeout=link_timeout,
+        ) if urls else None
         explicit_name = fields[0] if not (urls and URL_RE.fullmatch(fields[0])) else ""
         place_name = explicit_name or (link_info or {}).get("label", "")
         record: Dict[str, Any] = {"장소": place_name or "확인 필요"}
@@ -515,7 +522,13 @@ def parse_place_lines(content: str, *, resolve_short_links: bool = True,
             record["종류"] = fields[2]
         if urls:
             record["지도 URL"] = link_info["url"]
-            if link_info.get("resolution_status") == "needs_confirmation":
+            if link_info.get("resolution_status") in {"needs_confirmation", "not_needed"} and (
+                defer_external and link_info.get("host") in SHORT_MAP_HOSTS
+            ):
+                record["정보 상태"] = "외부 확인 대기"
+                record["외부 조회 필요"] = True
+                record["추가 확인"] = ["지도 링크의 장소명·목적지 일치 여부"]
+            elif link_info.get("resolution_status") == "needs_confirmation":
                 record["정보 상태"] = "확인 필요"
                 record["추가 확인"] = ["장소명" if not explicit_name else "지도 링크 확인"]
         if len(fields) > 3 and fields[3] and not urls:
@@ -556,7 +569,8 @@ def _place_match_status(destination: str, region: str,
 
 
 def prepare_place_confirmation(content: str, destination: str = "",
-                              evidence: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+                              evidence: Sequence[Dict[str, Any]] = (),
+                              defer_external: bool = False) -> Dict[str, Any]:
     """Prepare a place list for destination review before a Notion write.
 
     ``evidence`` is supplied by the host's web/Maps lookup and may contain a
@@ -564,7 +578,7 @@ def prepare_place_confirmation(content: str, destination: str = "",
     source URL.  Without evidence the result remains ``확인 필요``; this keeps
     an odd or unrelated link out of the saved place library.
     """
-    rows = parse_place_lines(content)
+    rows = parse_place_lines(content, defer_external=defer_external)
     destination_text = text(destination)
     evidence_by_name: Dict[str, Dict[str, Any]] = {}
     for item in evidence:
@@ -592,12 +606,24 @@ def prepare_place_confirmation(content: str, destination: str = "",
         else:
             row["추가 확인"] = ["여행지와 장소의 일치 여부"]
             needs_review.append(row)
+    external_jobs = [
+        {
+            "kind": "place_lookup",
+            "query": row.get("장소") if row.get("장소") != "확인 필요" else row.get("지도 URL"),
+            "destination": destination_text,
+            "url": row.get("지도 URL"),
+        }
+        for row in rows
+        if row.get("외부 조회 필요")
+    ]
     return {
         "목적지": destination_text,
         "장소": rows,
         "확인 완료": confirmed_rows,
         "검토 필요": needs_review,
         "저장 가능": bool(rows) and not needs_review,
+        "외부 조회": external_jobs,
+        "외부 조회 분리": bool(external_jobs),
         "확인 질문": (
             "여행지와 맞지 않거나 확인되지 않은 장소가 있습니다. 확인 후 저장할까요?"
             if needs_review else "이 장소 목록을 저장할까요?"
@@ -818,7 +844,8 @@ def normalize_shopping_candidate(candidate: Dict[str, Any], item_name: str = "",
 
 def prepare_shopping_research(item_name: str, destination: str = "",
                               candidates: Sequence[Dict[str, Any]] = (),
-                              default_currency: str = "미정") -> Dict[str, Any]:
+                              default_currency: str = "미정",
+                              defer_external: bool = False) -> Dict[str, Any]:
     """Build a confirmation packet for a name-only shopping request.
 
     A host can use ``검색어`` with its web/image tools, pass the results back
@@ -846,14 +873,24 @@ def prepare_shopping_research(item_name: str, destination: str = "",
             missing = []
         else:
             missing = list(dict.fromkeys(field for row in normalized for field in row.get("추가 확인", [])))
+    external_jobs = []
+    if defer_external and not normalized:
+        external_jobs.append({
+            "kind": "shopping_lookup",
+            "query": query,
+            "destination": text(destination),
+            "item": item,
+        })
     return {
         "품목": item,
         "검색어": query,
         "후보": normalized,
-        "상태": "확인 대기" if normalized else "검색 필요",
+        "상태": "확인 대기" if normalized else ("외부 확인 대기" if defer_external else "검색 필요"),
         "추가 확인": missing,
         "확인 질문": "이 후보 정보로 저장할까요?" if normalized else "검색 결과를 확인한 뒤 후보를 보여드릴까요?",
         "저장 가능": bool(normalized) and any(row.get("저장 가능") for row in normalized),
+        "외부 조회": external_jobs,
+        "외부 조회 분리": bool(external_jobs),
     }
 
 
@@ -1411,6 +1448,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-input", type=Path, help="shopping 외부 검색 후보 JSON")
     parser.add_argument("--candidate-index", type=int, help="확인할 후보 번호(0부터 시작)")
     parser.add_argument("--evidence-input", type=Path, help="places 외부 지도/검색 확인 JSON")
+    parser.add_argument("--defer-external", action="store_true",
+                        help="외부 지도·검색을 분리하고 조회 작업만 반환")
     parser.add_argument("--approved-places", help="확인 후 저장을 허용할 장소명(쉼표 구분)")
     parser.add_argument("--traveler", help="확인된 쇼핑 행의 담당 여행자")
     parser.add_argument("--confirm", action="store_true", help="선택한 후보를 사용자 확인 완료로 표시")
@@ -1481,7 +1520,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     raw_evidence = [raw_evidence]
                 if isinstance(raw_evidence, list):
                     evidence = [item for item in raw_evidence if isinstance(item, dict)]
-            packet = prepare_place_confirmation(content, args.destination or "", evidence)
+            packet = prepare_place_confirmation(
+                content, args.destination or "", evidence,
+                defer_external=args.defer_external,
+            )
             if args.approved_places:
                 packet["승인된 장소"] = confirm_place_rows(
                     packet,
@@ -1523,6 +1565,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     args.destination or "",
                     candidates,
                     args.base_currency or "미정",
+                    defer_external=args.defer_external,
                 )
         elif args.command in {"organize", "import"}:
             if args.text is not None:
@@ -1530,7 +1573,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if args.command == "organize" or args.kind in {"auto", "itinerary"}:
                     result = organize_schedule(content, args.start_date, args.duration_days)
                 elif args.kind == "place":
-                    result = parse_place_lines(content)
+                    result = parse_place_lines(content, defer_external=args.defer_external)
                 elif args.kind == "shopping":
                     result = parse_shopping_lines(content)
                 elif args.kind == "link":

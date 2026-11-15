@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -809,6 +810,30 @@ class ClientTests(unittest.TestCase):
         batches = [call.args[2]["children"] for call in request.call_args_list]
         self.assertEqual([len(batch) for batch in batches], [100, 100, 5])
         self.assertEqual([block for batch in batches for block in batch], blocks)
+
+    def test_keepalive_transport_uses_persistent_opener(self):
+        with patch.dict(os.environ, {"SOUVENIR_HTTP_TRANSPORT": "keepalive"}):
+            client = ni.NotionClient("test-token")
+        with patch.object(client._opener, "open", return_value=self.response({"id": "ok"})) as opener:
+            self.assertEqual(client.request("GET", "/pages/page"), {"id": "ok"})
+        opener.assert_called_once()
+
+    def test_coordinator_auto_mode_skips_single_writer(self):
+        with patch.dict(os.environ, {
+            "SOUVENIR_COORDINATOR_URL": "http://coordinator.invalid",
+            "SOUVENIR_COORDINATOR_MODE": "auto",
+            "SOUVENIR_EXPECT_CONCURRENT": "0",
+        }, clear=False):
+            self.assertFalse(ni.coordinator_enabled())
+            with ni.distributed_lease("workspace", "trip", "edit", "owner") as lease:
+                self.assertIsNone(lease)
+
+    def test_coordinator_always_mode_is_enabled(self):
+        with patch.dict(os.environ, {
+            "SOUVENIR_COORDINATOR_URL": "http://coordinator.invalid",
+            "SOUVENIR_COORDINATOR_MODE": "always",
+        }, clear=False):
+            self.assertTrue(ni.coordinator_enabled())
 
 
 if __name__ == "__main__":

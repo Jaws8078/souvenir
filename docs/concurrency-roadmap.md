@@ -140,6 +140,17 @@ fallback `NotionClient`는 프로세스 내부에서 요청 간격을 두고, 42
 
 신규 행의 즉시 페이지 재조회는 생략하지만, 각 작업 키는 `pending_operations`에 남긴다. 파트가 끝나면 DB별 한 번의 최종 조회로 행이 실제 뷰에 표시되는지와 작업 키를 확인한다. 기존 행은 저장 직전 `last_edited_time` 확인을 유지하고, 최종 조회가 실패하면 성공으로 처리하지 않는다. 요청 수·재시도 수·사전 조회·쓰기·검증 소요 시간은 비밀 없는 `performance` 결과로 기록한다. 느린 환경에서는 `SOUVENIR_WRITE_CONCURRENCY=1`로 순차 모드로 내릴 수 있다.
 
+### 6. 9~12번 속도 최적화 — 외부 조회·캐시·전송·coordinator
+
+9~12번은 저장의 안전 경계를 바꾸지 않고 대기 시간을 줄이는 작업이다.
+
+- **외부 검색 분리**: 장소의 단축 지도 링크 해석과 쇼핑 후보 검색을 입력 정리·Notion 쓰기와 분리한다. `--defer-external`은 원문과 `외부 조회` 작업만 반환하고, 호스트가 검색 근거를 수집한 뒤 사용자 승인 후 저장한다.
+- **템플릿 검증 캐시**: `.souvenir-template-cache.json`에 워크스페이스·계약 해시·검증된 복제본 ID/URL·확인 시각만 기록한다. 24시간 TTL이 지나거나 계약이 바뀌면 전체 검증을 다시 하며 개인 데이터·토큰·쿠키는 캐시하지 않는다.
+- **HTTP 전송 최적화**: `SOUVENIR_HTTP_TRANSPORT=keepalive`에서 persistent opener를 재사용하고, 타임아웃·최대 재시도·요청 간격을 환경 변수로 조절한다. 쓰기의 불확실한 5xx는 재전송하지 않는다.
+- **필요할 때만 coordinator**: 기본 `auto` 모드에서는 단일 작성자의 coordinator 왕복을 생략한다. 여러 세션이 같은 여행을 수정할 때 `SOUVENIR_EXPECT_CONCURRENT=1`, 항상 강제할 때 `SOUVENIR_COORDINATOR_MODE=always`를 사용한다. 활성화된 coordinator가 응답하지 않으면 안전을 위해 쓰기를 중단한다.
+
+이 최적화로 처음 입력을 받은 뒤의 로컬 정리 단계와 이미 확인된 템플릿 재실행은 빨라지지만, 실제 Notion API 속도·외부 검색·워크스페이스 rate limit까지 제거되는 것은 아니다.
+
 ### P1 테스트
 
 - [x] 서로 다른 세션의 같은 여행 lease 충돌
@@ -153,7 +164,7 @@ fallback `NotionClient`는 프로세스 내부에서 요청 간격을 두고, 42
 
 ## P2 · 분산 환경 확장 — coordinator 구현 완료, 운영 배포 필요
 
-Notion API만으로는 여러 컴퓨터 사이의 강한 분산 잠금을 보장할 수 없다. `skills/souvenir/scripts/coordinator.py`에 의존성 없는 SQLite·HTTP coordinator를 추가했고, `SOUVENIR_COORDINATOR_URL`이 설정된 실행기는 Notion 쓰기 전에 coordinator lease를 획득한다. 설정 방법과 운영 주의사항은 [P2 coordinator 가이드](coordinator.md)에 정리했다.
+Notion API만으로는 여러 컴퓨터 사이의 강한 분산 잠금을 보장할 수 없다. `skills/souvenir/scripts/coordinator.py`에 의존성 없는 SQLite·HTTP coordinator를 추가했고, `SOUVENIR_COORDINATOR_MODE=always` 또는 `SOUVENIR_EXPECT_CONCURRENT=1`인 실행기만 Notion 쓰기 전에 coordinator lease를 획득한다. 설정 방법과 운영 주의사항은 [P2 coordinator 가이드](coordinator.md)에 정리했다.
 
 ### 후보 구조
 
@@ -175,7 +186,7 @@ coordinator는 다음을 책임진다.
 - 작업 재시작·취소·보상 처리
 - 감사 로그와 충돌 이력
 
-현재 구현은 SQLite 트랜잭션으로 위 책임을 수행한다. lease heartbeat는 클라이언트 context manager가 자동으로 보내고, queue·멱등 키·보상 이벤트·schema migration 상태도 같은 저장소에 기록한다. coordinator가 설정됐는데 연결되지 않으면 실행기는 P1로 몰래 내려가지 않고 쓰기를 중단한다.
+현재 구현은 SQLite 트랜잭션으로 위 책임을 수행한다. lease heartbeat는 클라이언트 context manager가 자동으로 보내고, queue·멱등 키·보상 이벤트·schema migration 상태도 같은 저장소에 기록한다. 활성화된 coordinator가 설정됐는데 연결되지 않으면 실행기는 P1로 몰래 내려가지 않고 쓰기를 중단한다. 기본 `auto` 단일 작성자 경로에서는 coordinator를 호출하지 않는다.
 
 ### P2에서 보장할 것
 

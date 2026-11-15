@@ -82,6 +82,40 @@ class TemplateGateTests(unittest.TestCase):
         self.assertEqual(action["action"], "blocked")
         self.assertIn("복제 허용", action["reason"])
 
+    def test_cached_copy_is_reused_within_ttl(self):
+        state = self.base()
+        state.update({
+            "workspace_id": "workspace-1",
+            "template_page_id": "page-1",
+            "template_page_url": "https://notion.so/page-1",
+            "template_workspace_id": "workspace-1",
+            "valid_copy": True,
+        })
+        cache = {"version": gate.CACHE_VERSION, "entries": {
+            f"workspace-1:{gate.source_fingerprint(SOURCE)}": {
+                "valid_copy": True,
+                "template_workspace_id": "workspace-1",
+                "template_page_id": "page-1",
+                "template_page_url": "https://notion.so/page-1",
+                "checked_at": 100.0,
+            }
+        }}
+        cached = gate.cached_copy(state, SOURCE, cache=cache, now=120.0, ttl_seconds=60)
+        self.assertEqual(cached["template_page_id"], "page-1")
+
+    def test_expired_cache_is_ignored(self):
+        state = {"workspace_id": "workspace-1"}
+        cache = {"version": gate.CACHE_VERSION, "entries": {
+            f"workspace-1:{gate.source_fingerprint(SOURCE)}": {
+                "valid_copy": True,
+                "template_workspace_id": "workspace-1",
+                "template_page_id": "page-1",
+                "template_page_url": "https://notion.so/page-1",
+                "checked_at": 100.0,
+            }
+        }}
+        self.assertIsNone(gate.cached_copy(state, SOURCE, cache=cache, now=200.0, ttl_seconds=60))
+
 
 if __name__ == "__main__":
     unittest.main()

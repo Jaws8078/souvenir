@@ -25,9 +25,11 @@ python3 skills/souvenir/scripts/coordinator.py serve \
 ```bash
 export SOUVENIR_COORDINATOR_URL='https://coordinator.example.com'
 export SOUVENIR_COORDINATOR_TOKEN='같은 토큰'
+# 여러 세션이 같은 여행을 동시에 수정하는 환경에서만 활성화
+export SOUVENIR_EXPECT_CONCURRENT=1
 ```
 
-이 환경 변수가 없으면 Souvenir는 기존 P1 경로(로컬 잠금 + Notion 작업 기록)를 사용한다. URL이 설정됐는데 coordinator에 연결할 수 없으면 안전을 위해 Notion 쓰기를 시작하지 않고 중단한다.
+기본 `SOUVENIR_COORDINATOR_MODE=auto`에서는 URL이 있어도 단일 작성자일 때 기존 P1 경로(로컬 잠금 + Notion 작업 기록)를 사용한다. 여러 세션이 확실히 공유되는 경우 `SOUVENIR_EXPECT_CONCURRENT=1`을 켜고, 항상 coordinator를 강제하려면 `SOUVENIR_COORDINATOR_MODE=always`를 사용한다. 활성화된 coordinator에 연결할 수 없으면 안전을 위해 Notion 쓰기를 시작하지 않고 중단한다.
 
 ## 동작 보장
 

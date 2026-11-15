@@ -104,6 +104,13 @@ fallback 설치 경로에서도 같은 계약을 사용합니다. 일정·항공
 
 여러 행을 저장할 때는 입력을 먼저 한 번에 정리한 뒤, 대상 DB를 한 번 읽어 작업 키 색인을 만들고 독립 행을 제한 병렬로 반영합니다. 신규 행의 즉시 재조회는 생략하고 파트별 최종 조회로 실제 표시 여부를 확인하므로, 안전한 멱등·충돌 보호는 유지하면서 대기 시간을 줄입니다. 기본 동시 저장 수는 4개이며, 문제가 있는 환경에서는 `SOUVENIR_WRITE_CONCURRENCY=1`로 순차 처리할 수 있습니다. 저장 결과에는 요청 수·재시도 수·단계별 소요 시간을 담은 비밀 없는 `performance` 정보가 포함됩니다.
 
+### 9~12단계 속도 최적화
+
+- **외부 검색 분리**: 장소의 Google Maps 리디렉션·쇼핑 후보 검색은 핵심 입력 정리·Notion 저장과 분리합니다. 먼저 사용자 입력을 빠르게 확인한 뒤 `외부 확인 대기` 작업만 만들고, 검색 근거를 받은 다음 한 번 승인해 저장합니다. 로컬 실행기에서는 `--defer-external` 옵션이 이 모드를 선택합니다.
+- **템플릿 검사 캐시**: 워크스페이스·고정 템플릿 계약·복제본 ID만 비밀 없이 로컬 캐시합니다. 24시간 안에 같은 사본을 다시 실행하면 전체 구조 검사를 반복하지 않고 캐시를 사용하며, 만료·템플릿 변경·검증 실패 때만 전체 검사를 다시 합니다.
+- **HTTP 재사용·재시도 튜닝**: `SOUVENIR_HTTP_TRANSPORT=keepalive`에서 persistent opener를 사용하고, `SOUVENIR_HTTP_TIMEOUT`, `SOUVENIR_HTTP_MAX_RETRIES`, `SOUVENIR_REQUEST_SPACING`으로 환경별 지연·재시도를 조절합니다. 저장 요청의 불확실한 서버 오류는 자동 재전송하지 않습니다.
+- **coordinator 지연 호출**: 기본 `auto` 모드에서는 단일 작성자일 때 중앙 coordinator를 호출하지 않습니다. 여러 세션이 같은 여행을 만질 때만 `SOUVENIR_EXPECT_CONCURRENT=1`을 켜거나, 운영 환경에서 `SOUVENIR_COORDINATOR_MODE=always`를 사용합니다. coordinator를 명시적으로 사용하는데 연결이 실패하면 안전하게 쓰기를 중단합니다.
+
 ### 지갑은 다섯 칸만 입력
 
 사용 내역의 기본 입력은 `사용처 · 거래 유형 · 결제 단계 · 결제 수단 · 금액`입니다. 사용 금액은 연결된 지갑에서 자동 차감되고, `사용액 · 남은 금액 · 사용률`은 읽기 전용 결과로 표시됩니다. 예정 비용은 실제 지출과 분리합니다.
@@ -183,9 +190,11 @@ python3 skills/souvenir/scripts/coordinator.py serve \
 ```bash
 export SOUVENIR_COORDINATOR_URL='https://coordinator.example.com'
 export SOUVENIR_COORDINATOR_TOKEN='긴 무작위 토큰'
+# 여러 기기에서 같은 여행을 동시에 수정하는 경우에만 켭니다.
+export SOUVENIR_EXPECT_CONCURRENT=1
 ```
 
-URL을 설정했는데 coordinator가 꺼져 있으면 안전을 위해 Notion 쓰기를 시작하지 않습니다. HTTPS reverse proxy·인증·백업은 [P2 coordinator 가이드](docs/coordinator.md)를 참고합니다.
+단일 작성자라면 URL이 있어도 `auto` 모드가 coordinator 왕복을 건너뜁니다. 강제로 매번 사용하려면 `SOUVENIR_COORDINATOR_MODE=always`를 설정하세요. coordinator를 사용하기로 한 실행에서 연결이 꺼져 있으면 안전을 위해 Notion 쓰기를 시작하지 않습니다. HTTPS reverse proxy·인증·백업은 [P2 coordinator 가이드](docs/coordinator.md)를 참고합니다.
 
 ## 업데이트와 문제 해결
 

@@ -14,7 +14,10 @@ No credentials, cookies, or browser state are accepted or persisted here.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
@@ -22,6 +25,8 @@ from typing import Any, Dict, Mapping, Optional
 SCRIPT_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = SCRIPT_DIR.parent
 DEFAULT_SOURCE = PACKAGE_ROOT / "assets" / "template-source.json"
+DEFAULT_CACHE = Path(".souvenir-template-cache.json")
+CACHE_VERSION = 1
 
 STATUSES = {
     "unknown",
@@ -36,6 +41,94 @@ STATUSES = {
     "blocked",
 }
 CAPABILITIES = {"native_duplicate", "browser_automation", "manual"}
+
+
+def source_fingerprint(source: Mapping[str, Any]) -> str:
+    """Return a stable digest for the canonical template contract only."""
+    payload = {
+        "template_url": source.get("template_url"),
+        "accepted_titles": list(source.get("accepted_titles") or []),
+        "required_sections": list(source.get("required_sections") or []),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def load_cache(path: Path = DEFAULT_CACHE) -> Dict[str, Any]:
+    if not path.exists():
+        return {"version": CACHE_VERSION, "entries": {}}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {"version": CACHE_VERSION, "entries": {}}
+    if not isinstance(loaded, dict) or loaded.get("version") != CACHE_VERSION:
+        return {"version": CACHE_VERSION, "entries": {}}
+    entries = loaded.get("entries")
+    return {"version": CACHE_VERSION, "entries": entries if isinstance(entries, dict) else {}}
+
+
+def _cache_key(workspace_id: Any, source: Mapping[str, Any]) -> str:
+    return f"{workspace_id or 'unknown'}:{source_fingerprint(source)}"
+
+
+def cached_copy(state: Mapping[str, Any], source: Mapping[str, Any], *,
+                cache: Optional[Mapping[str, Any]] = None,
+                now: Optional[float] = None, ttl_seconds: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Return a non-sensitive cached copy only while its contract is fresh."""
+    workspace_id = state.get("workspace_id")
+    if not workspace_id:
+        return None
+    cache = cache or {}
+    entries = cache.get("entries", {}) if isinstance(cache, Mapping) else {}
+    entry = entries.get(_cache_key(workspace_id, source)) if isinstance(entries, Mapping) else None
+    if not isinstance(entry, Mapping) or not entry.get("valid_copy"):
+        return None
+    if entry.get("template_workspace_id") != workspace_id:
+        return None
+    if not entry.get("template_page_id") or not entry.get("template_page_url"):
+        return None
+    if ttl_seconds is None:
+        try:
+            ttl = int(os.environ.get("SOUVENIR_TEMPLATE_CACHE_TTL_SECONDS", "86400"))
+        except ValueError:
+            ttl = 86400
+    else:
+        ttl = ttl_seconds
+    checked_at = entry.get("checked_at")
+    try:
+        age = (now if now is not None else time.time()) - float(checked_at)
+    except (TypeError, ValueError):
+        return None
+    if ttl < 0 or age < 0 or age > ttl:
+        return None
+    return dict(entry)
+
+
+def record_cache(state: Mapping[str, Any], source: Mapping[str, Any], *,
+                 path: Path = DEFAULT_CACHE, now: Optional[float] = None) -> None:
+    """Persist only the validated template identity, never tokens or page data."""
+    workspace_id = state.get("workspace_id")
+    if not workspace_id or not state.get("valid_copy"):
+        return
+    page_id = state.get("template_page_id")
+    page_url = state.get("template_page_url")
+    if not page_id or not page_url:
+        return
+    cache = load_cache(path)
+    cache.setdefault("entries", {})[_cache_key(workspace_id, source)] = {
+        "valid_copy": True,
+        "template_workspace_id": workspace_id,
+        "template_page_id": page_id,
+        "template_page_url": page_url,
+        "checked_at": now if now is not None else time.time(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    temporary.replace(path)
 
 
 def load_source(path: Path = DEFAULT_SOURCE) -> Dict[str, Any]:
@@ -95,6 +188,7 @@ def next_action(state: Mapping[str, Any], capability: str = "manual",
             "template_status": "confirmed",
             "action": "reuse_existing_copy",
             "requires_user_confirmation": False,
+            "cache_mode": state.get("cache_mode", "full"),
             "message": "기존 Souvenir 복제본을 재사용합니다.",
         }
 
@@ -241,6 +335,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--payload", help="이벤트 payload JSON")
     parser.add_argument("--capability", choices=sorted(CAPABILITIES), default="manual")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE,
+                        help="검증된 템플릿 복제본의 로컬 캐시 경로")
     parser.add_argument("--pretty", action="store_true")
     return parser
 
@@ -256,12 +352,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             raise ValueError("상태 JSON의 최상위 값은 객체여야 합니다.")
         state = loaded
     if args.command == "plan":
+        cached = cached_copy(state, source, cache=load_cache(args.cache))
+        if cached:
+            state = {
+                **state,
+                "copy_checked": True,
+                "valid_copy": True,
+                "template_status": "confirmed",
+                "template_page_id": cached["template_page_id"],
+                "template_page_url": cached["template_page_url"],
+                "template_workspace_id": cached["template_workspace_id"],
+                "cache_mode": "cached",
+            }
         result = next_action(state, args.capability, source)
+        if cached:
+            result["cache_hit"] = True
+            result["cache_checked_at"] = cached.get("checked_at")
     else:
         if not args.event_name:
             raise ValueError("event에는 --event가 필요합니다.")
         payload = json.loads(args.payload) if args.payload else {}
         result = apply_event(state, args.event_name, payload)
+        if args.event_name == "copy_validated" and result.get("valid_copy"):
+            record_cache(result, source, path=args.cache)
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
     return 0
 

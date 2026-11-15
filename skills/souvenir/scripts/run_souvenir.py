@@ -42,6 +42,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "coordinator": {
                         "configured": bool(os.environ.get("SOUVENIR_COORDINATOR_URL")),
                         "endpoint": os.environ.get("SOUVENIR_COORDINATOR_URL") or None,
+                        "mode": os.environ.get("SOUVENIR_COORDINATOR_MODE", "auto"),
+                        "expected_concurrent": os.environ.get("SOUVENIR_EXPECT_CONCURRENT", "")
+                        .strip().lower() in {"1", "true", "yes", "on"},
+                    },
+                    "http": {
+                        "transport": os.environ.get("SOUVENIR_HTTP_TRANSPORT", "urllib"),
+                        "max_retries": os.environ.get("SOUVENIR_HTTP_MAX_RETRIES", "3"),
                     },
                     "template_gate": {
                         "entrypoint": str(SCRIPT_DIR / "template_gate.py"),
