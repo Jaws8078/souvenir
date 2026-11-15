@@ -41,7 +41,10 @@ class PackageTests(unittest.TestCase):
         flow = (PACKAGE / "references" / "conversation-flow.md").read_text(encoding="utf-8")
         self.assertIn("Notion 연결 게이트", skill)
         self.assertIn("notion_connection=connected", skill)
+        self.assertIn("get_self({})", skill)
         self.assertIn("공식 연결 UI", onboarding)
+        self.assertIn("현재 워크스페이스", onboarding)
+        self.assertIn("진행 / 전환", onboarding)
         self.assertIn("읽기 전용 Notion 요청 한 번", flow)
 
         plugin = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
