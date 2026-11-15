@@ -7,19 +7,23 @@
 대화가 이어지는 동안 아래 상태를 유지한다. Notion에는 비밀번호·쿠키·토큰을 저장하지 않는다.
 
 ```text
-setup: notion_connection(unknown|connected|needs_user_action|unavailable) → account → workspace_id, workspace_name, workspace_confirmed → skill_active → login → template
+setup: notion_connection(unknown|connected|needs_user_action|unavailable) → account → workspace_id, workspace_name, workspace_confirmed → skill_active → login → template_status(unknown|found|needs_duplicate|confirmed|blocked) → template_source_url, template_page_id, template_page_url, template_confirmed
 trip: trip_id, destination, start_date, end_date, duration_days,
       traveler_count, base_currency
 plan: selected_parts, current_part, completed_parts
 ```
 
-각 단계가 끝날 때 `Souvenir · 설치 기록` 또는 여행 요약 행의 상태를 갱신한다. 사용자가 중간에 멈추면 같은 `current_part`부터 재개하고, 이미 저장된 행은 제목·여행 키·원본 ID를 기준으로 재사용한다. `notion_connection`이 `needs_user_action` 또는 `unavailable`이면 여행 데이터 단계로 넘어가지 않고 연결 안내에서 멈춘다.
+각 단계가 끝날 때 `Souvenir · 설치 기록` 또는 여행 요약 행의 상태를 갱신한다. 사용자가 중간에 멈추면 같은 `current_part`부터 재개하고, 이미 저장된 행은 제목·여행 키·원본 ID를 기준으로 재사용한다. `notion_connection`이 `needs_user_action` 또는 `unavailable`이면 여행 데이터 단계로 넘어가지 않고 연결 안내에서 멈춘다. `template_status`가 `confirmed`가 아니면 계획 파트 메뉴와 여행 데이터 단계로 넘어가지 않는다.
 
 첫 실행의 연결 확인은 읽기 전용 Notion 요청 한 번으로 시작한다. 연결이 확인되면 `get_self({})`로 계정과 워크스페이스 ID·이름을 읽고, 이름을 항상 사용자에게 보여준 뒤 진행 확인을 받는다. 요청이 연결 UI를 반환하면 그 UI를 보여주고, 사용자가 승인했다고 답한 뒤 같은 요청을 한 번 재시도한다. 워크스페이스 이름을 읽지 못하면 연결된 것으로 처리하지 않는다. Souvenir가 다른 플러그인을 자동 설치하거나 사용자의 OAuth 승인을 대신한다고 설명하지 않는다.
 
+## 고정 템플릿 선행 검사
+
+워크스페이스 확인 직후 작업 메뉴보다 먼저 [고정 템플릿 게이트](template-gate.md)를 실행한다. 기준 설정의 링크·허용 제목·필수 섹션과 현재 워크스페이스의 유효한 설치 기록을 대조한다. 일치하는 복제본이 있으면 `template_status=confirmed`로 바꾸고 그 페이지의 구조·뷰·수식을 그대로 재사용한다. 없으면 기준 링크를 보여주고 사용자가 Notion에서 `복제`를 누를 때까지 `needs_duplicate`에서 대기한다. 복제 후 실제 페이지 URL·ID·필수 섹션을 다시 확인하기 전에는 여행 행·일정·예산·예약을 만들지 않는다. 링크가 막혔거나 검사가 실패하면 `blocked`로 멈추며 청사진·다른 템플릿·빈 페이지로 우회하지 않는다.
+
 ## 시작 질문
 
-설치가 끝난 새 사용자에게는 아래 한 줄만 먼저 보여준다.
+고정 템플릿 검사가 `confirmed`가 된 새 사용자에게만 아래 한 줄을 보여준다.
 
 ```text
 여행지 / 출발일 / 종료일 또는 기간 / 인원 / 기준 통화

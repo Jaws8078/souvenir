@@ -51,6 +51,23 @@ class PackageTests(unittest.TestCase):
         prompts = plugin["extensions"]["com.openai"]["interface"]["defaultPrompt"]
         self.assertTrue(any("Notion 연결" in prompt for prompt in prompts))
 
+    def test_canonical_template_gate_is_strict(self):
+        skill = (PACKAGE / "SKILL.md").read_text(encoding="utf-8")
+        gate = (PACKAGE / "references" / "template-gate.md").read_text(encoding="utf-8")
+        onboarding = (PACKAGE / "references" / "onboarding.md").read_text(encoding="utf-8")
+        flow = (PACKAGE / "references" / "conversation-flow.md").read_text(encoding="utf-8")
+        source = json.loads((PACKAGE / "assets" / "template-source.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(source["canonical"])
+        self.assertFalse(source["allow_blueprint_fallback"])
+        self.assertIsNone(source["fallback"])
+        self.assertIn("template_status", flow)
+        self.assertIn("고정 템플릿 게이트", skill)
+        self.assertIn("다른 템플릿", gate)
+        self.assertIn("needs_duplicate", gate)
+        self.assertIn("template_status=blocked", onboarding)
+        self.assertIn("청사진·코드 설치·빈 페이지로 대체하지 않는다", onboarding)
+
     def test_packaged_skill_references_do_not_require_local_checkout(self):
         for file in PACKAGE.rglob("*.md"):
             for target in re.findall(r"\]\(([^)]+)\)", file.read_text(encoding="utf-8")):

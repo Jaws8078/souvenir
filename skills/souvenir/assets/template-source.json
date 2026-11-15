@@ -2,6 +2,19 @@
   "source": "public_notion_link",
   "template_url": "https://rift-volcano-c77.notion.site/Souvenir-4171036c4e4280928564d129600f6472?source=copy_link",
   "copy_required": true,
-  "fallback": "blueprint_rebuild",
-  "notes": "개인 데이터가 제거된 Notion 배포본을 공개하고 '복제 허용'을 켠 링크입니다. 마켓 등록은 필요하지 않습니다. 링크가 없거나 복제를 승인하지 않으면 내장 청사진을 보조 경로로 사용합니다."
+  "canonical": true,
+  "accepted_titles": [
+    "Souvenir · 여행 템플릿 · 링크 배포본",
+    "Souvenir · 여행 템플릿 원본"
+  ],
+  "required_sections": [
+    "여행 중 확인 존",
+    "계획 존",
+    "오늘 일정",
+    "다음 일정",
+    "여행 지갑"
+  ],
+  "fallback": null,
+  "allow_blueprint_fallback": false,
+  "notes": "개인 데이터가 제거된 Notion 배포본을 공개하고 '복제 허용'을 켠 링크입니다. 일반 @souvenir 실행은 이 링크의 원본 또는 복제본만 사용하며, 링크가 없거나 복제가 확인되지 않으면 계획을 시작하지 않습니다. 코드 청사진은 개발자 점검·명시적 별도 요청에서만 사용합니다."
 }
