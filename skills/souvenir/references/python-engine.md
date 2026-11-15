@@ -7,7 +7,7 @@
 - `check`: 일정 겹침, 이동 여유 부족, 예약 기한, 체크인·체크아웃 오류, 장소 정보 오래됨, 필수 정보 누락을 검사한다.
 - `budget`: 지갑·지출·분담 데이터를 통화별로 계산하고 잔액·사용률·카테고리 합계·송금 방향을 만든다. 확인되지 않은 환율은 자동으로 적용하지 않는다.
 - `organize`: `일정명 | 시작-종료 | 장소 | 메모` 형식의 짧은 입력을 일차·날짜·시간 필드로 분리한다. `3박 4일`처럼 실제 날짜가 없으면 일차만 만든다.
-- `import`: 표준 라이브러리만 사용해 UTF-8 CSV, JSON, iCalendar(`.ics`), 텍스트 장소 목록과 지도 링크를 읽는다. PDF·이미지 OCR은 별도 승인과 도구가 필요한 후속 범위다.
+- `import`: 표준 라이브러리만 사용해 UTF-8 CSV, JSON, iCalendar(`.ics`), 텍스트 장소 목록과 지도 링크를 읽는다. Google Maps 공유 단축 링크(`maps.app.goo.gl`, `goo.gl/maps`)는 리디렉션을 따라 최종 주소에서 장소명을 추출한다. 링크가 만료·차단돼 해석되지 않으면 호스트명을 장소명으로 저장하지 않고 `확인 필요` 상태를 반환한다. PDF·이미지 OCR은 별도 승인과 도구가 필요한 후속 범위다.
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약을 읽기 전용 화면용 JSON으로 만든다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 
 ## 오프라인 사용
@@ -39,6 +39,13 @@ python3 skills/souvenir/scripts/trip_engine.py organize \
 python3 skills/souvenir/scripts/trip_engine.py import --input expenses.csv --kind auto --pretty
 python3 skills/souvenir/scripts/trip_engine.py import --input trip.ics --kind auto --pretty
 python3 skills/souvenir/scripts/trip_engine.py import --text 'https://maps.google.com/?query=Ohori' --kind link --pretty
+```
+
+단축 링크도 같은 방식으로 가져올 수 있다. 네트워크에서 최종 주소를 확인할 수 없을 때는 저장하지 않고 확인 요청용 결과를 만든다.
+
+```bash
+python3 skills/souvenir/scripts/trip_engine.py import \
+  --text 'https://maps.app.goo.gl/공유토큰' --kind link --pretty
 ```
 
 ## Notion 연결

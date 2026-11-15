@@ -11,10 +11,13 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import html
 import json
 import re
 import sys
 import urllib.parse
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -23,6 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 TIME_RANGE_RE = re.compile(r"(?P<start>\d{1,2}:\d{2})\s*[-~–]\s*(?P<end>\d{1,2}:\d{2})")
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 URL_RE = re.compile(r"https?://[^\s|]+", re.I)
+SHORT_MAP_HOSTS = {"maps.app.goo.gl", "goo.gl"}
 
 ALIASES = {
     "title": ("title", "이름", "일정", "예약", "숙소", "내역", "장소", "항공편", "자료", "지갑", "여행자", "분담", "송금", "할 일", "준비물", "예산 항목", "서비스", "이동 구간", "결정", "날씨 확인", "검사", "품목"),
@@ -180,7 +184,8 @@ def organize_schedule(content: str, start_date: Optional[str] = None,
     return records
 
 
-def parse_place_lines(content: str) -> List[Dict[str, Any]]:
+def parse_place_lines(content: str, *, resolve_short_links: bool = True,
+                      link_timeout: float = 8.0) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for line in re.split(r"[\r\n]+", content):
         cleaned = line.strip(" -*\t")
@@ -188,14 +193,20 @@ def parse_place_lines(content: str) -> List[Dict[str, Any]]:
             continue
         fields = [part.strip() for part in re.split(r"\s*\|\s*", cleaned)]
         urls = URL_RE.findall(cleaned)
-        link_info = normalize_link(urls[0]) if len(fields) == 1 and urls else None
-        record: Dict[str, Any] = {"장소": (link_info or {}).get("label") or (link_info or {}).get("host") or fields[0]}
+        link_info = normalize_link(urls[0], resolve_short_links=resolve_short_links,
+                                   timeout=link_timeout) if urls else None
+        explicit_name = fields[0] if not (urls and URL_RE.fullmatch(fields[0])) else ""
+        place_name = explicit_name or (link_info or {}).get("label", "")
+        record: Dict[str, Any] = {"장소": place_name or "확인 필요"}
         if len(fields) > 1 and fields[1]:
             record["지역"] = fields[1]
         if len(fields) > 2 and fields[2]:
             record["종류"] = fields[2]
         if urls:
-            record["지도 URL"] = (link_info or normalize_link(urls[0]))["url"]
+            record["지도 URL"] = link_info["url"]
+            if link_info.get("resolution_status") == "needs_confirmation":
+                record["정보 상태"] = "확인 필요"
+                record["추가 확인"] = ["장소명" if not explicit_name else "지도 링크 확인"]
         if len(fields) > 3 and fields[3] and not urls:
             record["메모"] = fields[3]
         elif len(fields) > 4 and fields[4]:
@@ -318,18 +329,119 @@ def parse_shopping_lines(content: str) -> List[Dict[str, Any]]:
     return records
 
 
-def normalize_link(url: str) -> Dict[str, str]:
-    raw = text(url).strip("<>(),")
+def _clean_map_label(value_: Any) -> str:
+    """Decode a Google Maps label without turning coordinates into a name."""
+    label = html.unescape(urllib.parse.unquote_plus(text(value_))).strip()
+    if not label:
+        return ""
+    label = re.split(r"(?=@-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?)", label, maxsplit=1)[0]
+    label = label.split("!", 1)[0]
+    label = re.sub(r"\s+", " ", label).strip(" /,;|")
+    if not label or label.startswith("@") or label.lower() in {"maps", "place", "search"}:
+        return ""
+    return label
+
+
+def _map_label_from_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("query", "q", "destination", "place", "name"):
+        values = query.get(key) or query.get(key.upper())
+        if values:
+            label = _clean_map_label(values[0])
+            if label:
+                return label
+    segments = [urllib.parse.unquote_plus(segment) for segment in parsed.path.split("/") if segment]
+    for marker in ("place", "search"):
+        try:
+            index = next(index for index, segment in enumerate(segments) if segment.lower() == marker)
+        except StopIteration:
+            continue
+        if index + 1 < len(segments):
+            label = _clean_map_label(segments[index + 1])
+            if label:
+                return label
+    return ""
+
+
+def _resolve_short_map_url(url: str, timeout: float = 8.0) -> Optional[str]:
+    """Follow a Google Maps share link and return its final URL."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Souvenir travel planner)",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            final_url = text(response.geturl())
+            if final_url and final_url != url:
+                return final_url
+            body = response.read(256_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as error:
+        raise ValueError(f"지도 링크를 열 수 없습니다 (HTTP {error.code}).") from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise ValueError("지도 링크를 확인하지 못했습니다. 네트워크 연결 또는 링크 상태를 확인해주세요.") from error
+
+    patterns = (
+        r'<link[^>]+rel=["\'][^"\']*canonical[^"\']*["\'][^>]+href=["\']([^"\']+)',
+        r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:url["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body, re.I)
+        if match:
+            candidate = html.unescape(match.group(1)).strip()
+            if candidate:
+                return urllib.parse.urljoin(url, candidate)
+    return None
+
+
+def _normalize_link(url: str, *, resolve_short_links: bool = True,
+                    timeout: float = 8.0) -> Dict[str, Any]:
+    raw = text(url).strip("<>()[],.;")
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("http 또는 https 링크만 가져올 수 있습니다.")
-    query = urllib.parse.parse_qs(parsed.query)
-    label = ""
-    for key in ("query", "q", "destination", "place"):
-        if query.get(key):
-            label = query[key][0]
-            break
-    return {"url": raw, "host": parsed.netloc.lower(), "label": urllib.parse.unquote(label)}
+    host = parsed.netloc.lower().split(":", 1)[0]
+    resolved_url = raw
+    resolution_status = "not_needed"
+    resolution_error = ""
+    if resolve_short_links and host in SHORT_MAP_HOSTS:
+        try:
+            candidate = _resolve_short_map_url(raw, timeout=timeout)
+            if candidate:
+                resolved_url = candidate
+                resolution_status = "resolved"
+            else:
+                resolution_status = "needs_confirmation"
+                resolution_error = "최종 Google Maps 주소를 찾지 못했습니다."
+        except ValueError as error:
+            resolution_status = "needs_confirmation"
+            resolution_error = str(error)
+    label = _map_label_from_url(resolved_url)
+    if host in SHORT_MAP_HOSTS and not label:
+        resolution_status = "needs_confirmation"
+        if not resolution_error:
+            resolution_error = "장소명을 확인하지 못했습니다."
+    result: Dict[str, Any] = {
+        "url": raw,
+        "host": host,
+        "label": label,
+        "resolution_status": resolution_status,
+    }
+    if resolved_url != raw:
+        result["resolved_url"] = resolved_url
+    if resolution_error:
+        result["resolution_error"] = resolution_error
+    return result
+
+
+def normalize_link(url: str, *, resolve_short_links: bool = True,
+                   timeout: float = 8.0) -> Dict[str, Any]:
+    return _normalize_link(url, resolve_short_links=resolve_short_links, timeout=timeout)
+
 
 
 def parse_ics(content: str) -> List[Dict[str, Any]]:

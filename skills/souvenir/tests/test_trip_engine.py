@@ -125,6 +125,30 @@ class TripEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.normalize_link("javascript:alert(1)")
 
+    def test_google_short_link_resolves_place_name(self):
+        short_url = "https://maps.app.goo.gl/example"
+        resolved_url = "https://www.google.com/maps/place/Ohori+Park/@33.589,130.376"
+        with patch.object(engine, "_resolve_short_map_url", return_value=resolved_url):
+            info = engine.normalize_link(short_url)
+            self.assertEqual(info["label"], "Ohori Park")
+            self.assertEqual(info["resolution_status"], "resolved")
+            self.assertEqual(info["resolved_url"], resolved_url)
+            row = engine.parse_place_lines(short_url)[0]
+            self.assertEqual(row["장소"], "Ohori Park")
+            self.assertNotIn("정보 상태", row)
+
+    def test_google_short_link_failure_needs_confirmation(self):
+        short_url = "https://maps.app.goo.gl/expired"
+        with patch.object(engine, "_resolve_short_map_url", return_value=None):
+            info = engine.normalize_link(short_url)
+            self.assertEqual(info["label"], "")
+            self.assertEqual(info["resolution_status"], "needs_confirmation")
+            row = engine.parse_place_lines(short_url)[0]
+            self.assertEqual(row["장소"], "확인 필요")
+            self.assertEqual(row["정보 상태"], "확인 필요")
+            self.assertEqual(row["추가 확인"], ["장소명"])
+            self.assertNotEqual(row["장소"], "maps.app.goo.gl")
+
     def test_shopping_import_preserves_optional_fields(self):
         rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")
         self.assertEqual(rows[0]["품목"], "유자 킷캣")
