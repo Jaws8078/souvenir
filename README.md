@@ -111,6 +111,8 @@ fallback 설치 경로에서도 같은 계약을 사용합니다. 일정·항공
 - **HTTP 재사용·재시도 튜닝**: `SOUVENIR_HTTP_TRANSPORT=keepalive`에서 persistent opener를 사용하고, `SOUVENIR_HTTP_TIMEOUT`, `SOUVENIR_HTTP_MAX_RETRIES`, `SOUVENIR_REQUEST_SPACING`으로 환경별 지연·재시도를 조절합니다. 저장 요청의 불확실한 서버 오류는 자동 재전송하지 않습니다.
 - **coordinator 지연 호출**: 기본 `auto` 모드에서는 단일 작성자일 때 중앙 coordinator를 호출하지 않습니다. 여러 세션이 같은 여행을 만질 때만 `SOUVENIR_EXPECT_CONCURRENT=1`을 켜거나, 운영 환경에서 `SOUVENIR_COORDINATOR_MODE=always`를 사용합니다. coordinator를 명시적으로 사용하는데 연결이 실패하면 안전하게 쓰기를 중단합니다.
 
+반복 측정값과 방법은 [성능 메모](docs/concurrency-roadmap.md#7-9-12번-전후-성능-메모--2026-11-15)에 기록해 두었습니다.
+
 ### 지갑은 다섯 칸만 입력
 
 사용 내역의 기본 입력은 `사용처 · 거래 유형 · 결제 단계 · 결제 수단 · 금액`입니다. 사용 금액은 연결된 지갑에서 자동 차감되고, `사용액 · 남은 금액 · 사용률`은 읽기 전용 결과로 표시됩니다. 예정 비용은 실제 지출과 분리합니다.
