@@ -5,7 +5,7 @@ description: Use when the user wants to create a Notion travel planner template,
 
 # Souvenir 여행 도우미
 
-연결된 Notion 플러그인으로 **사용자가 제공한 고정 템플릿 링크의 원본 또는 복제본만** 읽고 저장한다. 첫 실행에서는 가벼운 읽기 전용 Notion 확인을 먼저 실행해 연결 상태를 감지하고, 연결이 없으면 Notion 공식 연결 UI를 안내한 뒤 사용자의 승인 후 같은 단계에서 재개한다. 연결된 워크스페이스를 확인하기 전에는 검색·페이지 생성·템플릿 복제를 시도하지 않는다. 템플릿이 없으면 먼저 사용자에게 복제 허락을 받고, 호스트가 CUA 브라우저를 제공하면 고정 링크를 열어 `Duplicate`를 수행한다. CUA가 없으면 사용자에게 직접 복제를 안내한다. 어느 경로든 사본의 실제 페이지 ID·URL과 구조를 다시 확인하고서야 계획을 시작한다. 일반 실행에서는 다른 템플릿, 청사진 재구축, 임의의 빈 페이지로 우회하지 않는다.
+연결된 Notion 플러그인으로 **사용자가 제공한 고정 템플릿 링크의 원본 또는 복제본만** 읽고 저장한다. 첫 실행에서는 가벼운 읽기 전용 Notion 확인을 먼저 실행해 연결 상태를 감지하고, 연결이 없으면 Notion 공식 연결 UI를 안내한 뒤 사용자의 승인 후 같은 단계에서 재개한다. 연결된 워크스페이스를 확인하기 전에는 검색·페이지 생성·템플릿 복제를 시도하지 않는다. 템플릿이 없으면 먼저 사용자에게 복제 허락을 받고, **웹 링크를 열기 전에 로컬 Notion 앱 설치·실행 가능 여부를 반드시 확인한다.** 로컬 앱이 있으면 앱에서 로그인·`Duplicate`·워크스페이스 선택을 진행하고 웹 브라우저는 열지 않는다. 앱이 없거나 실행할 수 없다고 확인된 경우에만 CUA 브라우저 또는 수동 웹 복제를 사용한다. 어느 경로든 사본의 실제 페이지 ID·URL과 구조를 다시 확인하고서야 계획을 시작한다. 일반 실행에서는 다른 템플릿, 청사진 재구축, 임의의 빈 페이지로 우회하지 않는다.
 
 ## 작업 선택
 
@@ -47,12 +47,17 @@ Souvenir는 다른 플러그인을 몰래 설치하거나 OAuth·워크스페이
    ```
 
 4. 사용자가 진행하면 호스트 capability를 확인한다.
-   - `native_duplicate`: 현재 워크스페이스에 접근 가능한 Notion 네이티브 복제를 사용한다.
-   - `browser_automation`: CUA로 링크 열기·Duplicate·워크스페이스 선택을 수행한다.
-     로그인·OAuth·MFA·CAPTCHA는 사용자 입력을 기다린다.
+   - 로컬 앱 우선: 먼저 로컬 Notion 앱을 열어 로그인·Duplicate·워크스페이스 선택을
+     수행한다. 앱이 설치되어 있다는 사실만으로 로그인 완료로 간주하지 않는다.
+   - `native_duplicate`: 로컬 앱이 없거나 사용할 수 없다고 확인된 뒤, 현재 워크스페이스에
+     접근 가능한 Notion 네이티브 복제를 사용한다.
+   - `browser_automation`: 로컬 앱이 없거나 사용할 수 없다고 확인된 뒤에만 CUA로
+     링크 열기·Duplicate·워크스페이스 선택을 수행한다. 로그인·OAuth·MFA·CAPTCHA는
+     사용자 입력을 기다린다.
    - `manual`: 고정 링크를 보여주고 사용자가 직접 `Duplicate`를 누르도록 안내한다.
-5. 복제 작업은 `duplicate_consent_pending` → `native_in_progress` 또는
-   `browser_in_progress` 또는 `manual_duplicate_wait` → `validating` 상태로
+5. 복제 작업은 `duplicate_consent_pending` → 로컬 앱 점검 → `local_in_progress`,
+   또는 로컬 앱을 사용할 수 없을 때 `native_in_progress`·`browser_in_progress`·
+   `manual_duplicate_wait` → `validating` 상태로
    기록한다. 사용자가 복제 완료를 알리거나 도구가 결과 URL을 반환해도 즉시
    성공으로 처리하지 말고 실제 사본을 다시 읽는다.
 6. 재검사가 통과하기 전에는 여행·일정·예산·예약 데이터를 쓰지 않는다.

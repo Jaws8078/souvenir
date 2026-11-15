@@ -20,6 +20,7 @@ template_status:
   found            # 현재 워크스페이스에서 기준 템플릿 후보를 찾음
   needs_duplicate  # 링크를 열어 사용자가 복제해야 함
   duplicate_consent_pending # 복제를 시작하기 전 사용자 허락 대기
+  local_in_progress # 로컬 Notion 앱에서 링크·Duplicate 진행 중
   native_in_progress # 연결된 Notion 도구의 네이티브 복제 진행 중
   browser_in_progress # CUA 브라우저의 링크·Duplicate 진행 중
   manual_duplicate_wait # 브라우저 자동화가 없어 사용자 클릭 대기
@@ -37,26 +38,32 @@ template_workspace_id = <복제본이 있는 워크스페이스 ID>
 template_page_id = <복제본 페이지 ID>
 template_page_url = <복제본 페이지 URL>
 template_confirmed = true|false
-duplicate_mode = native_duplicate|browser_automation|manual
+duplicate_mode = local_app|native_duplicate|browser_automation|manual
 consent_granted = true|false
+local_notion_status = unknown|installed|unavailable|unusable
 ```
 
 ## 복제 capability와 자동화 우선순위
 
 복제는 Python 로컬 실행기가 임의로 브라우저를 조작하는 기능이 아니다. 호스트가
-제공하는 capability를 먼저 확인하고, 실제 브라우저·Notion 도구를 호스트에
-위임한다.
+먼저 로컬 Notion 앱 설치·실행 가능 여부를 확인하고, 그 결과에 따라 실제 앱·브라우저·
+Notion 도구를 호스트에 위임한다. `unknown` 상태에서는 웹 링크를 열 수 없다.
 
-1. `native_duplicate` — 기준 페이지가 현재 연결된 워크스페이스 안에 있고
-   Notion 도구에 복제 권한이 있을 때만 `duplicate_page`를 사용한다. 복제는
-   비동기로 끝날 수 있으므로 반환 URL을 즉시 완료로 표시하지 말고 다시 읽어
-   확인한다.
-2. `browser_automation` — CUA가 있으면 고정 링크를 열고, 사용자가 허락한
-   뒤 `Duplicate`와 대상 워크스페이스 선택을 수행한다. 로그인·OAuth·MFA·
-   CAPTCHA는 사용자가 직접 처리한다. CUA가 없거나 브라우저 세션이 끊기면
-   `manual_duplicate_wait`로 전환한다.
-3. `manual` — 링크를 보여주고 사용자가 Notion에서 직접 `Duplicate`를 누른
-   뒤 완료했다고 답할 때까지 기다린다.
+1. 로컬 앱 점검 — 앱이 설치되어 있고 열 수 있으면 `local_notion_status=installed`로
+   기록한다. 설치만 확인하고 로그인 완료로 추정하지 않는다. 호스트는 로컬 Notion 앱을
+   열어 앱 안에서 로그인·`Duplicate`·워크스페이스 선택을 진행하며 웹 브라우저를 열지
+   않는다. 복제 중에는 `local_in_progress`를 사용한다.
+2. `native_duplicate` — 로컬 앱이 없거나 사용할 수 없다고 확인된 뒤, 기준 페이지가
+   현재 연결된 워크스페이스 안에 있고 Notion 도구에 복제 권한이 있을 때만
+   `duplicate_page`를 사용한다. 복제는 비동기로 끝날 수 있으므로 반환 URL을 즉시
+   완료로 표시하지 말고 다시 읽어 확인한다.
+3. `browser_automation` — 로컬 앱이 `unavailable` 또는 `unusable`로 확인된 뒤에만
+   CUA로 고정 링크를 열고, 사용자가 허락한 뒤 `Duplicate`와 대상 워크스페이스 선택을
+   수행한다. 로그인·OAuth·MFA·CAPTCHA는 사용자가 직접 처리한다. CUA가 없거나
+   브라우저 세션이 끊기면 `manual_duplicate_wait`로 전환한다.
+4. `manual` — 로컬 앱이 없거나 사용할 수 없고 브라우저 자동화도 없을 때 링크를
+   보여주고 사용자가 Notion에서 직접 `Duplicate`를 누른 뒤 완료했다고 답할 때까지
+   기다린다.
 
 어떤 capability든 먼저 아래 한 번의 명시적 허락을 받는다.
 
@@ -67,11 +74,20 @@ Souvenir 고정 템플릿을 열어 이 워크스페이스에 복제하고,
 원본은 수정하지 않습니다. [진행] [취소]
 ```
 
-호스트가 CUA 자동화를 시작하면 다음 작업을 수행한다.
+로컬 앱이 없거나 사용할 수 없고 호스트가 CUA 자동화를 시작할 때만 다음 작업을
+수행한다.
 
 ```text
-고정 링크 열기 → 로그인 상태 확인 → Duplicate 클릭
+로컬 앱 점검(unavailable/unusable) → 고정 링크 열기 → 로그인 상태 확인 → Duplicate 클릭
 → 대상 워크스페이스 선택 → 복제 완료 URL 확인
+→ Notion 재조회로 필수 섹션·DB·뷰 검증
+```
+
+로컬 앱이 설치된 경우에는 위 흐름 대신 다음을 사용한다.
+
+```text
+로컬 Notion 앱 열기 → 앱에서 로그인 상태 확인 → Duplicate 클릭
+→ 대상 워크스페이스 선택 → 복제 완료 페이지 확인
 → Notion 재조회로 필수 섹션·DB·뷰 검증
 ```
 
@@ -87,10 +103,20 @@ CUA나 네이티브 복제가 실패하면 코드 청사진으로 몰래 전환�
 Souvenir: 연결된 계정과 워크스페이스를 확인했습니다.
           Yuseong's Workspace에 고정 템플릿을 복제하고 검증할까요? [진행] [취소]
 사용자: 진행
-Souvenir: 템플릿 링크를 여는 중… Duplicate를 실행하는 중…
-          로그인·MFA가 필요하면 화면에서 직접 처리해주세요.
+Souvenir: 로컬 Notion 앱 설치·실행 가능 여부를 확인하는 중…
+Souvenir: 로컬 앱을 찾았습니다. 웹 브라우저는 열지 않고 앱에서 복제합니다.
+          앱 로그인·MFA가 필요하면 화면에서 직접 처리해주세요.
+Souvenir: 앱에서 Duplicate와 워크스페이스 선택을 진행하는 중…
 Souvenir: 복제본 URL을 확인했습니다. 필수 섹션과 데이터베이스를 검증하는 중…
 Souvenir: 검증 완료. 이제 여행 정보를 입력할 수 있습니다.
+```
+
+로컬 앱이 없는 경우에만 다음처럼 웹 경로로 전환한다.
+
+```text
+Souvenir: 로컬 Notion 앱을 찾지 못했습니다. 웹 복제 경로를 사용해도 될까요?
+Souvenir: 템플릿 링크를 여는 중… Duplicate를 실행하는 중…
+          로그인·MFA가 필요하면 화면에서 직접 처리해주세요.
 ```
 
 ### 브라우저 자동화가 없는 경우
@@ -129,7 +155,9 @@ Souvenir: 검증 완료. 이제 여행 정보를 입력할 수 있습니다.
    복제본으로 식별되는 페이지가 정확히 하나일 때만 `found`로 둔다.
 3. 후보가 없거나 구조 검사가 실패하면 `duplicate_consent_pending`으로 바꾸고
    복제 허락을 한 번 받는다. 허락 전에는 링크를 열거나 복제를 호출하지 않는다.
-4. 허락 후 capability에 따라 `native_in_progress`, `browser_in_progress`,
+4. 허락 후 로컬 앱 점검을 먼저 수행한다. `installed`이면
+   `local_in_progress`로 바꾸고 앱 안에서 복제한다. `unavailable` 또는 `unusable`일
+   때만 capability에 따라 `native_in_progress`, `browser_in_progress`,
    `manual_duplicate_wait` 중 하나로 바꾼다. 브라우저 복제는 사용자의 Notion
    세션에서 수행하며 Souvenir가 쿠키·비밀번호·토큰을 대신 사용하거나 권한
    승인을 대신하지 않는다.

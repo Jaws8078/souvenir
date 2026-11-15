@@ -68,8 +68,9 @@ Souvenir는 Notion 연결을 먼저 확인합니다. 연결이 없으면 공식 
 2. 연결된 계정·워크스페이스 확인
 3. 현재 워크스페이스에 제공 템플릿이 있는지 검사
 4. 없으면 한 번 허락을 받고 복제 시도
-   - CUA 브라우저가 있으면 링크 열기·Duplicate·워크스페이스 선택을 자동 진행
-   - 없으면 링크를 열어 사용자가 Duplicate를 누르는 수동 경로로 전환
+   - 먼저 로컬 Notion 앱 설치·실행 가능 여부를 확인
+   - 로컬 앱이 있으면 앱 안에서 로그인·Duplicate·워크스페이스 선택을 진행하고 웹은 열지 않음
+   - 로컬 앱이 없거나 사용할 수 없을 때만 CUA 브라우저 또는 수동 링크 경로로 전환
 5. 복제본 URL·ID·필수 섹션 재검사
 6. 여행지·출발일·종료일(또는 기간)·인원·기준 통화 입력
 7. 필요한 계획 파트 선택
@@ -134,16 +135,20 @@ Souvenir의 디자인 원본은 Notion 템플릿입니다. [Souvenir 링크 배�
 
 사용자는 링크를 연 뒤 **복제**만 하면 됩니다. 별도 마켓 등록은 필요하지 않습니다. 링크 소유자는 `공유 → 웹에 게시 → 복제 허용`을 켜고, 비공개 작업 원본·예약·지갑·개인 메모는 공개하지 않습니다. 배포 링크는 [`template-source.json`](skills/souvenir/assets/template-source.json)에 관리합니다.
 
-`@souvenir`를 호출하면 이 링크가 자동으로 기준 템플릿으로 고정됩니다. 현재 워크스페이스에서 기준 템플릿 사본이 발견되면 그대로 재사용합니다. 사본이 없으면 먼저 한 번 허락을 받고, CUA 브라우저가 있는 호스트에서는 AI가 링크를 열어 `Duplicate`와 워크스페이스 선택을 진행합니다. CUA가 없으면 사용자가 링크에서 직접 `Duplicate`를 누릅니다. 어느 경로든 복제 후 URL·페이지 ID·필수 섹션을 다시 확인한 뒤에만 여행 데이터를 저장합니다. 일반 실행에서는 다른 템플릿이나 코드 청사진으로 대체하지 않습니다.
+`@souvenir`를 호출하면 이 링크가 자동으로 기준 템플릿으로 고정됩니다. 현재 워크스페이스에서 기준 템플릿 사본이 발견되면 그대로 재사용합니다. 사본이 없으면 먼저 한 번 허락을 받고 **로컬 Notion 앱 설치·실행 가능 여부를 먼저 확인합니다.** 로컬 앱이 있으면 웹 브라우저를 열지 않고 앱 안에서 로그인·`Duplicate`·워크스페이스 선택을 진행합니다. 로컬 앱이 없거나 사용할 수 없다고 확인된 경우에만 CUA 브라우저가 링크를 열어 `Duplicate`와 워크스페이스 선택을 진행하거나, CUA가 없으면 사용자가 링크에서 직접 `Duplicate`를 누릅니다. 어느 경로든 복제 후 URL·페이지 ID·필수 섹션을 다시 확인한 뒤에만 여행 데이터를 저장합니다. 일반 실행에서는 다른 템플릿이나 코드 청사진으로 대체하지 않습니다.
 
 복제 capability와 현재 게이트 상태는 호스트용 로컬 실행기로도 확인할 수 있습니다. 사용자가 명령을 입력할 필요는 없으며, Codex·ChatGPT 호스트가 다음 결과를 읽어 브라우저·Notion 도구를 호출합니다.
 
 ```bash
 python3 skills/souvenir/scripts/run_souvenir.py template-gate plan \
   --capability browser_automation --pretty
+
+# 로컬 Notion 앱 설치 여부만 읽기 전용으로 점검
+python3 skills/souvenir/scripts/run_souvenir.py template-gate plan \
+  --local-status --pretty
 ```
 
-이 명령은 브라우저를 직접 열지 않습니다. `duplicate_browser` 같은 다음 행동만 반환하고, 실제 클릭·로그인·MFA는 호스트와 사용자가 처리합니다. 브라우저 제어가 없는 환경은 `wait_for_manual_duplicate`로 안전하게 멈춥니다.
+첫 번째 명령은 브라우저를 직접 열지 않습니다. 기본 상태에서는 `check_local_notion`을 먼저 반환하고, 로컬 점검 결과가 `installed`일 때 `duplicate_local_app`만 반환합니다. 로컬 앱이 `unavailable` 또는 `unusable`로 확인된 경우에만 `duplicate_browser` 또는 `wait_for_manual_duplicate`로 내려갑니다. 실제 클릭·로그인·MFA는 호스트와 사용자가 처리합니다.
 
 ### 템플릿 업데이트 순서
 

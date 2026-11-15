@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "template_gate.py"
@@ -28,6 +29,15 @@ class TemplateGateTests(unittest.TestCase):
             "template_status": "needs_duplicate",
         }
 
+    def test_local_detection_is_read_only_and_reports_unavailable(self):
+        with patch.object(gate.platform, "system", return_value="Linux"), \
+                patch.object(gate.Path, "exists", return_value=False), \
+                patch.object(gate.shutil, "which", return_value=None):
+            result = gate.detect_local_notion()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertFalse(result["installed"])
+        self.assertEqual(result["platform"], "linux")
+
     def test_workspace_confirmation_precedes_template_access(self):
         action = gate.next_action({"workspace_name": "Workspace"}, "manual", SOURCE)
         self.assertEqual(action["action"], "confirm_workspace")
@@ -41,12 +51,41 @@ class TemplateGateTests(unittest.TestCase):
 
     def test_browser_action_is_host_owned(self):
         state = gate.apply_event(self.base(), "consent_granted")
+        state = gate.apply_event(state, "local_preflight", {"status": "unavailable"})
         action = gate.next_action(state, "browser_automation", SOURCE)
         self.assertEqual(action["action"], "duplicate_browser")
         self.assertIn("Notion 로그인", action["sensitive_steps"])
 
+    def test_local_preflight_always_precedes_web_action(self):
+        state = gate.apply_event(self.base(), "consent_granted")
+        action = gate.next_action(state, "browser_automation", SOURCE)
+        self.assertEqual(action["action"], "check_local_notion")
+        self.assertEqual(action["local_notion_status"], "unknown")
+        self.assertNotEqual(action["action"], "duplicate_browser")
+
+    def test_installed_local_app_wins_over_browser_capability(self):
+        state = gate.apply_event(self.base(), "consent_granted")
+        state = gate.apply_event(state, "local_preflight", {"status": "installed"})
+        action = gate.next_action(state, "browser_automation", SOURCE)
+        self.assertEqual(action["action"], "duplicate_local_app")
+        self.assertEqual(action["template_status"], "local_in_progress")
+        self.assertEqual(action["duplicate_mode"], "local_app")
+        self.assertIn("웹 브라우저는 열지 않습니다", action["message"])
+
+    def test_unusable_local_app_allows_browser_fallback(self):
+        state = gate.apply_event(self.base(), "consent_granted")
+        state = gate.apply_event(state, "local_preflight", {"status": "unusable"})
+        action = gate.next_action(state, "browser_automation", SOURCE)
+        self.assertEqual(action["action"], "duplicate_browser")
+        self.assertIn("사용할 수 없어", action["message"])
+
+    def test_local_started_requires_installed_preflight(self):
+        with self.assertRaises(ValueError):
+            gate.apply_event(self.base(), "local_started")
+
     def test_manual_fallback_waits_without_creating_data(self):
         state = gate.apply_event(self.base(), "consent_granted")
+        state = gate.apply_event(state, "local_preflight", {"status": "unavailable"})
         action = gate.next_action(state, "manual", SOURCE)
         self.assertEqual(action["action"], "wait_for_manual_duplicate")
         self.assertEqual(action["template_status"], "manual_duplicate_wait")
@@ -63,6 +102,13 @@ class TemplateGateTests(unittest.TestCase):
         })
         self.assertEqual(gate.next_action(state, "browser_automation", SOURCE)["action"],
                          "validate_copy")
+
+    def test_local_in_progress_is_polled_instead_of_opening_web(self):
+        state = gate.apply_event(self.base(), "consent_granted")
+        state = gate.apply_event(state, "local_preflight", {"status": "installed"})
+        state = gate.apply_event(state, "local_started")
+        action = gate.next_action(state, "browser_automation", SOURCE)
+        self.assertEqual(action["action"], "poll_local_duplicate")
 
     def test_validated_copy_unlocks_planning(self):
         state = gate.apply_event(self.base(), "consent_granted")

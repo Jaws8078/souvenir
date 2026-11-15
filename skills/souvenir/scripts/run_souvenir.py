@@ -21,7 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from trip_engine import configure_output, main as engine_main  # noqa: E402
-from template_gate import main as template_gate_main  # noqa: E402
+from template_gate import detect_local_notion, main as template_gate_main  # noqa: E402
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -52,6 +52,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     },
                     "template_gate": {
                         "entrypoint": str(SCRIPT_DIR / "template_gate.py"),
+                        "local_notion_preflight": detect_local_notion(),
                         "browser_actions": "host-provided",
                     },
                 },

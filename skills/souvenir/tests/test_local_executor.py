@@ -23,6 +23,7 @@ class LocalExecutorTests(unittest.TestCase):
         payload = json.loads(output.call_args.args[0])
         self.assertEqual(payload["status"], "READY")
         self.assertEqual(payload["engine"], "souvenir-trip-engine")
+        self.assertIn("local_notion_preflight", payload["template_gate"])
 
     def test_other_commands_delegate_to_trip_engine(self):
         with patch("run_souvenir.engine_main", return_value=7) as engine:

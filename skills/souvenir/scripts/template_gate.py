@@ -4,9 +4,12 @@
 The local executor cannot click a browser or approve a Notion OAuth dialog by
 itself.  This module therefore returns a deterministic action packet for the
 host (Codex/ChatGPT/another computer-use host) and records the result of that
-action.  A host may satisfy ``duplicate_browser`` with CUA, use
-``duplicate_native`` when the source page is accessible in the connected
-workspace, or fall back to ``wait_for_manual_duplicate``.
+action.  A host must check for a local Notion app before choosing a web route.
+When the app exists, ``duplicate_local_app`` is the only duplication action;
+``duplicate_browser`` is available only after the host reports that the local
+app is absent or unusable.  A host may still satisfy ``duplicate_native`` when
+the source page is accessible in the connected workspace, or fall back to
+``wait_for_manual_duplicate``.
 
 No credentials, cookies, or browser state are accepted or persisted here.
 """
@@ -17,6 +20,8 @@ import argparse
 import hashlib
 import json
 import os
+import platform
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -33,6 +38,7 @@ STATUSES = {
     "found",
     "needs_duplicate",
     "duplicate_consent_pending",
+    "local_in_progress",
     "native_in_progress",
     "browser_in_progress",
     "manual_duplicate_wait",
@@ -41,6 +47,71 @@ STATUSES = {
     "blocked",
 }
 CAPABILITIES = {"native_duplicate", "browser_automation", "manual"}
+LOCAL_NOTION_STATES = {"unknown", "installed", "unavailable", "unusable"}
+
+
+def _local_notion_candidates() -> list[Path]:
+    """Return platform-specific Notion app/executable candidates.
+
+    This is deliberately a read-only probe.  Opening the app and completing
+    login are host/UI responsibilities, not actions for the local executor.
+    """
+    system = platform.system().lower()
+    if system == "darwin":
+        return [
+            Path("/Applications/Notion.app"),
+            Path.home() / "Applications" / "Notion.app",
+        ]
+    if system == "windows":
+        candidates: list[Path] = []
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        program_files = os.environ.get("ProgramFiles")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
+        if local_app_data:
+            candidates.extend([
+                Path(local_app_data) / "Notion" / "Notion.exe",
+                Path(local_app_data) / "Programs" / "Notion" / "Notion.exe",
+            ])
+        for root in (program_files, program_files_x86):
+            if root:
+                candidates.append(Path(root) / "Notion" / "Notion.exe")
+        return candidates
+    return [
+        Path("/usr/bin/notion"),
+        Path("/usr/local/bin/notion"),
+        Path.home() / ".local" / "bin" / "notion",
+    ]
+
+
+def detect_local_notion() -> Dict[str, Any]:
+    """Detect whether a local Notion app is installed without opening it.
+
+    ``installed`` means that a known app bundle/executable was found.  It does
+    not claim that the user is logged in or that the host can control the app;
+    the host must launch it and report ``unusable`` if that step fails.
+    """
+    system = platform.system().lower()
+    candidates = _local_notion_candidates()
+    found = [str(path) for path in candidates if path.exists()]
+    command = shutil.which("notion") or shutil.which("Notion.exe")
+    if command:
+        found.append(command)
+    # Preserve order while avoiding a duplicate path from PATH and the app
+    # bundle probe.
+    found = list(dict.fromkeys(found))
+    status = "installed" if found else "unavailable"
+    return {
+        "status": status,
+        "platform": system,
+        "installed": bool(found),
+        "candidates": [str(path) for path in candidates],
+        "found": found,
+        "message": (
+            "로컬 Notion 앱을 찾았습니다. 웹 브라우저를 열지 않고 로컬 앱을 우선 사용합니다."
+            if found
+            else "로컬 Notion 앱을 찾지 못했습니다. 이때만 웹 복제 경로를 사용할 수 있습니다."
+        ),
+    }
 
 
 def source_fingerprint(source: Mapping[str, Any]) -> str:
@@ -152,14 +223,20 @@ def _copy_identity(state: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def next_action(state: Mapping[str, Any], capability: str = "manual",
-                source: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                source: Optional[Mapping[str, Any]] = None,
+                local_notion: str = "unknown") -> Dict[str, Any]:
     """Return the next host action without performing external I/O."""
     if capability not in CAPABILITIES:
         raise ValueError(f"지원하지 않는 템플릿 복제 capability입니다: {capability}")
+    if local_notion not in LOCAL_NOTION_STATES:
+        raise ValueError(f"알 수 없는 local_notion 상태입니다: {local_notion}")
     source = source or load_source()
     status = str(state.get("template_status") or "unknown")
     if status not in STATUSES:
         raise ValueError(f"알 수 없는 template_status입니다: {status}")
+    state_local_notion = state.get("local_notion_status")
+    if local_notion == "unknown" and state_local_notion in LOCAL_NOTION_STATES - {"unknown"}:
+        local_notion = str(state_local_notion)
 
     base = {
         "template_url": source["template_url"],
@@ -167,6 +244,7 @@ def next_action(state: Mapping[str, Any], capability: str = "manual",
         "required_sections": list(source["required_sections"]),
         "workspace_id": state.get("workspace_id"),
         "workspace_name": state.get("workspace_name"),
+        "local_notion_status": local_notion,
     }
 
     if not state.get("workspace_confirmed"):
@@ -220,6 +298,14 @@ def next_action(state: Mapping[str, Any], capability: str = "manual",
             "requires_user_confirmation": False,
             "message": "Notion 네이티브 복제가 끝났는지 확인합니다.",
         }
+    if status == "local_in_progress":
+        return {
+            **base,
+            "template_status": status,
+            "action": "poll_local_duplicate",
+            "requires_user_confirmation": False,
+            "message": "로컬 Notion 앱에서 복제가 끝났는지 확인합니다.",
+        }
     if status == "browser_in_progress":
         return {
             **base,
@@ -258,27 +344,59 @@ def next_action(state: Mapping[str, Any], capability: str = "manual",
             ),
         }
 
+    if local_notion == "unknown":
+        return {
+            **base,
+            "template_status": "duplicate_consent_pending",
+            "action": "check_local_notion",
+            "requires_user_confirmation": False,
+            "message": (
+                "웹 링크를 열기 전에 로컬 Notion 앱의 설치·실행 가능 여부를 확인합니다. "
+                "앱이 있으면 웹 브라우저를 열지 않습니다."
+            ),
+        }
+
+    if local_notion == "installed":
+        return {
+            **base,
+            "template_status": "local_in_progress",
+            "action": "duplicate_local_app",
+            "duplicate_mode": "local_app",
+            "requires_user_confirmation": False,
+            "sensitive_steps": ["로컬 Notion 앱 로그인", "MFA/CAPTCHA", "워크스페이스 선택"],
+            "message": (
+                "로컬 Notion 앱을 열고 그 안에서 로그인·Duplicate·워크스페이스 선택을 진행합니다. "
+                "웹 브라우저는 열지 않습니다."
+            ),
+        }
+
     if capability == "native_duplicate":
         return {
             **base,
             "template_status": "native_in_progress",
             "action": "duplicate_native",
+            "duplicate_mode": "native_duplicate",
             "requires_user_confirmation": False,
-            "message": "현재 워크스페이스에서 Notion 네이티브 복제를 시작합니다.",
+            "message": "로컬 Notion 앱을 사용할 수 없어 연결된 Notion 도구의 네이티브 복제를 시작합니다.",
         }
     if capability == "browser_automation":
         return {
             **base,
             "template_status": "browser_in_progress",
             "action": "duplicate_browser",
+            "duplicate_mode": "browser_automation",
             "requires_user_confirmation": False,
             "sensitive_steps": ["Notion 로그인", "MFA/CAPTCHA", "워크스페이스 선택"],
-            "message": "브라우저에서 템플릿을 열고 Duplicate를 실행합니다.",
+            "message": (
+                "로컬 Notion 앱을 찾지 못했거나 사용할 수 없어 웹 브라우저에서 템플릿을 열고 "
+                "Duplicate를 실행합니다."
+            ),
         }
     return {
         **base,
         "template_status": "manual_duplicate_wait",
         "action": "wait_for_manual_duplicate",
+        "duplicate_mode": "manual",
         "requires_user_confirmation": False,
         "message": "Notion에서 템플릿을 열고 Duplicate를 누른 뒤 복제 완료를 알려주세요.",
     }
@@ -303,6 +421,21 @@ def apply_event(state: Mapping[str, Any], event: str, payload: Optional[Mapping[
     elif event == "consent_denied":
         result["consent_granted"] = False
         result["template_status"] = "needs_duplicate"
+    elif event == "local_preflight":
+        local_status = str(payload.get("status") or "")
+        if local_status not in LOCAL_NOTION_STATES - {"unknown"}:
+            raise ValueError(
+                "local_preflight payload.status는 installed, unavailable, unusable 중 하나여야 합니다."
+            )
+        result["local_notion_status"] = local_status
+        result["local_notion_checked_at"] = payload.get("checked_at") or time.time()
+        # The preflight result is not a duplication result. Keep the gate at
+        # the consented starting point until the host reports a start event.
+        result["template_status"] = "needs_duplicate"
+    elif event == "local_started":
+        if result.get("local_notion_status") != "installed":
+            raise ValueError("로컬 Notion 앱이 installed로 확인된 뒤에만 local_started를 기록할 수 있습니다.")
+        result["template_status"] = "local_in_progress"
     elif event == "native_started":
         result["template_status"] = "native_in_progress"
     elif event == "browser_started":
@@ -334,6 +467,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event", dest="event_name", help="적용할 host 이벤트")
     parser.add_argument("--payload", help="이벤트 payload JSON")
     parser.add_argument("--capability", choices=sorted(CAPABILITIES), default="manual")
+    parser.add_argument(
+        "--local-notion",
+        choices=sorted(LOCAL_NOTION_STATES),
+        default="unknown",
+        help="로컬 Notion 앱 사전 점검 결과; unknown이면 check_local_notion을 먼저 반환합니다.",
+    )
+    parser.add_argument(
+        "--local-status",
+        action="store_true",
+        help="로컬 Notion 앱 설치 여부만 읽기 전용으로 점검합니다.",
+    )
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE,
                         help="검증된 템플릿 복제본의 로컬 캐시 경로")
@@ -343,6 +487,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.local_status:
+        print(json.dumps(detect_local_notion(), ensure_ascii=False, indent=2 if args.pretty else None))
+        return 0
     source = load_source(args.source)
     state: Dict[str, Any] = {}
     if args.state:
@@ -364,7 +511,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "template_workspace_id": cached["template_workspace_id"],
                 "cache_mode": "cached",
             }
-        result = next_action(state, args.capability, source)
+        result = next_action(state, args.capability, source, args.local_notion)
         if cached:
             result["cache_hit"] = True
             result["cache_checked_at"] = cached.get("checked_at")
