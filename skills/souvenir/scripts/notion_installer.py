@@ -31,6 +31,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 import uuid
@@ -670,6 +671,11 @@ def api_property(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"checkbox": {}}
     if kind == "url":
         return {"url": {}}
+    if kind == "files":
+        # Notion's files property accepts either uploaded files or external
+        # URLs.  The fallback writer uses the external form; a connected host
+        # may replace it with a Notion file-upload URL before saving.
+        return {"files": {}}
     if kind == "select":
         return {"select": {"options": [{"name": option} for option in spec.get("options", [])]}}
     if kind == "multi_select":
@@ -820,10 +826,16 @@ class NotionClient:
     def get_database(self, database_id: str) -> Dict[str, Any]:
         return self.request("GET", f"/databases/{database_id}")
 
-    def add_database_property(self, database_id: str, name: str) -> Dict[str, Any]:
-        """Add the implementation key to an older fallback database."""
+    def add_database_property(self, database_id: str, name: str,
+                              definition: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Add a property to an older fallback database.
+
+        ``definition`` is optional for backwards compatibility with the
+        idempotency migration, which historically added a rich-text key.  The
+        photo migration uses it to add a native Notion ``files`` property.
+        """
         result = self.request("PATCH", f"/databases/{database_id}", {
-            "properties": {name: {"rich_text": {}}},
+            "properties": {name: definition or {"rich_text": {}}},
         })
         self._souvenir_schema_cache.pop(f"__schema__:{database_id}", None)
         return result
@@ -935,13 +947,58 @@ def database_properties(database: Dict[str, Any]) -> Dict[str, Any]:
     return properties
 
 
+PHOTO_ALIASES = ("사진", "이미지", "사진 URL", "image_url", "image", "thumbnail", "cover")
+PHOTO_NAME_HINTS = ("사진", "이미지", "image", "thumbnail", "cover")
+
+
+def _add_photo_aliases(values: Dict[str, Any], specs: Dict[str, Dict[str, Any]]) -> None:
+    """Route every accepted photo input to the files and URL columns.
+
+    Older copied templates only have ``사진 URL`` while the current template
+    has both a visible ``사진`` files property and the source URL.  Keeping the
+    URL and files value together lets old copies remain readable and lets new
+    gallery views render the image without losing provenance.
+    """
+    photo = None
+    for alias in PHOTO_ALIASES:
+        candidate = values.get(alias)
+        if candidate not in (None, "", []):
+            photo = candidate
+            break
+    if photo in (None, "", []):
+        return
+    # New installs use the standard ``사진`` name.  Older marketplace copies
+    # used names such as ``장소 사진`` and ``숙소 사진``; populate those native
+    # file properties too so we do not create a second, empty image column.
+    for name, spec in specs.items():
+        kind = spec.get("type") if isinstance(spec, dict) else None
+        if kind not in {"file", "files"}:
+            continue
+        if not any(hint.casefold() in str(name).casefold() for hint in PHOTO_NAME_HINTS):
+            continue
+        if values.get(name) in (None, "", []):
+            values[name] = photo
+    if "사진 URL" in specs and values.get("사진 URL") in (None, "", []):
+        candidates = photo if isinstance(photo, list) else [photo]
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate = candidate.get("url") or candidate.get("source")
+            if candidate:
+                values["사진 URL"] = str(candidate)
+                break
+
+
 def property_value(spec: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]:
     """Convert a manifest seed value to a Notion page property payload."""
     if spec.get("computed") or spec.get("type") in {"formula", "rollup", "relation"}:
         return None
     kind = spec.get("type")
+    # Notion's connector schema calls this singular ``file`` while the REST
+    # API payload and portable manifest use ``files``.
+    if kind == "file":
+        kind = "files"
     if value is None:
-        if kind in {"title", "rich_text", "multi_select"}:
+        if kind in {"title", "rich_text", "multi_select", "files"}:
             return {kind: []}
         if kind == "checkbox":
             return {kind: False}
@@ -960,6 +1017,38 @@ def property_value(spec: Dict[str, Any], value: Any) -> Optional[Dict[str, Any]]
         return {"checkbox": value}
     if kind == "url":
         return {"url": str(value)}
+    if kind == "files":
+        values = value if isinstance(value, list) else [value]
+        encoded: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in values:
+            if isinstance(item, dict):
+                external = item.get("external") if isinstance(item.get("external"), dict) else None
+                url = item.get("url") or item.get("source") or (external or {}).get("url")
+                name = item.get("name") or item.get("filename") or "사진"
+                if item.get("type") == "file" and isinstance(item.get("file"), dict):
+                    file_url = item["file"].get("url")
+                    if file_url:
+                        url = file_url
+                if item.get("type") == "external" and external:
+                    url = external.get("url") or url
+            else:
+                url = item
+                name = "사진"
+            url_text = str(url or "").strip()
+            if not url_text:
+                continue
+            parsed = urllib.parse.urlparse(url_text)
+            if parsed.scheme not in {"http", "https"}:
+                raise InstallerError(
+                    f"{spec.get('name', '사진')}은 http(s) 이미지 URL이 필요합니다. "
+                    "로컬 첨부는 Notion 호스트의 파일 업로드 단계를 거친 뒤 저장하세요."
+                )
+            if url_text in seen:
+                continue
+            seen.add(url_text)
+            encoded.append({"type": "external", "name": str(name), "external": {"url": url_text}})
+        return {"files": encoded}
     if kind == "select":
         return {"select": {"name": str(value)}}
     if kind == "multi_select":
@@ -1075,6 +1164,7 @@ def _shopping_row_properties(manifest: Dict[str, Any], row: Dict[str, Any],
         raise InstallerError("쇼핑 행에 품목명이 필요합니다.")
     properties: Dict[str, Any] = {database["title_property"]: {"title": title_payload(item)}}
     values = dict(row)
+    _add_photo_aliases(values, specs)
     values["여행 키"] = trip_id
     # The write endpoint is only called after the user has approved the
     # candidate, so make that state explicit in Notion.
@@ -1466,10 +1556,22 @@ def _expand_part_rows(part: str, rows: Sequence[Dict[str, Any]]) -> List[tuple[s
 
 def _part_row_properties(manifest: Dict[str, Any], database_key: str,
                          row: Dict[str, Any], trip_id: str,
-                         operation_key: str) -> Dict[str, Any]:
+                         operation_key: str,
+                         live_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     database = database_by_key(manifest, database_key)
     specs = {item["name"]: item for item in database.get("properties", [])
              if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    # Keep the portable manifest as the source of truth for new installs, but
+    # augment it with legacy photo properties from an already-copied Notion
+    # template (for example ``장소 사진`` / ``숙소 사진``).  Those properties
+    # are real files columns and should receive the same input value.
+    for name, live in (live_schema or {}).items():
+        if name in specs or not isinstance(live, dict):
+            continue
+        if live.get("type") in {"file", "files"} and any(
+            hint.casefold() in str(name).casefold() for hint in PHOTO_NAME_HINTS
+        ):
+            specs[name] = {"name": name, "type": "files"}
     part_key = DATABASE_PART_KEYS.get(database_key, database_key)
     title = _part_title(part_key, row)
     # preparation rows are selected by their concrete DB, not by the alias
@@ -1495,6 +1597,7 @@ def _part_row_properties(manifest: Dict[str, Any], database_key: str,
         IDEMPOTENCY_PROPERTY: {"rich_text": rich_text(operation_key)},
     }
     values = dict(row)
+    _add_photo_aliases(values, specs)
     title_aliases = set(PART_TITLE_FIELDS.get(part_key, ()))
     title_aliases.update({"지갑 이름", "내역", "예산 항목", "분담"})
     for alias in title_aliases:
@@ -1650,7 +1753,12 @@ def save_part_rows(manifest: Dict[str, Any], client: NotionClient,
                         stable = stable_key("trip", trip_key, database_key, title)
                     else:
                         stable = stable_key("trip", trip_key, key, database_key, source_index)
-                    properties = _part_row_properties(manifest, database_key, row, trip_id, stable)
+                    live_schema = _live_database_schema(
+                        client, mapping["databases"][database_key], {}
+                    )
+                    properties = _part_row_properties(
+                        manifest, database_key, row, trip_id, stable, live_schema
+                    )
                     batch_entries.append({
                         "database_key": database_key,
                         "row": row,
@@ -1944,6 +2052,73 @@ def _verify_database_property(client: Any, database_id: str) -> None:
     properties = current.get("properties", {}) if isinstance(current, dict) else {}
     if IDEMPOTENCY_PROPERTY not in properties:
         raise UncertainWriteError("Souvenir 작업 키 속성을 저장 후 확인하지 못했습니다.")
+
+
+def _photo_file_property(properties: Dict[str, Any]) -> Optional[str]:
+    """Return an existing native file property suitable for a travel photo."""
+    for name, definition in properties.items():
+        if not isinstance(definition, dict):
+            continue
+        definition_type = definition.get("type")
+        is_file = definition_type in {"file", "files"} or "files" in definition or "file" in definition
+        if not is_file:
+            continue
+        if any(hint.casefold() in str(name).casefold() for hint in PHOTO_NAME_HINTS):
+            return str(name)
+    return None
+
+
+def _verify_photo_schema(client: Any, database_id: str, property_name: str = "사진") -> None:
+    current = client.get_database(database_id)
+    properties = current.get("properties", {}) if isinstance(current, dict) else {}
+    if not isinstance(properties, dict) or not _photo_file_property(properties):
+        raise UncertainWriteError("사진 파일 속성을 저장 후 확인하지 못했습니다.")
+
+
+def ensure_photo_schema(mapping: Dict[str, Any], path: Path, client: Any) -> None:
+    """Make the four image-bearing databases accept native Notion files.
+
+    The original template used ``장소 사진`` and ``숙소 사진``.  Those columns
+    are kept intact; only databases with no photo file column receive the
+    standard ``사진`` property.  This makes upgrades non-destructive while
+    keeping new/fallback installs consistent.
+    """
+    if mapping.get("photo_schema") == 1:
+        return
+    get_database = getattr(client, "get_database", None)
+    add_property = getattr(client, "add_database_property", None)
+    if not callable(get_database) or not callable(add_property):
+        raise InstallerError("사진 자동 저장을 확인하려면 Notion 데이터베이스 읽기·수정 권한이 필요합니다.")
+    for key in ("place", "long_transport", "stay", "shopping"):
+        database_id = mapping.get("databases", {}).get(key)
+        if not database_id:
+            continue
+        current = get_database(database_id)
+        properties = current.get("properties", {}) if isinstance(current, dict) else {}
+        if not isinstance(properties, dict):
+            raise InstallerError(f"데이터베이스 속성을 읽지 못했습니다: {key}")
+        if _photo_file_property(properties):
+            continue
+        operation = f"schema:{key}:사진"
+        def add_photo(database_id: str = database_id) -> Any:
+            try:
+                return add_property(database_id, "사진", {"files": {}})
+            except TypeError:
+                # Third-party test doubles and older clients may still expose
+                # the two-argument method.  They can complete the migration on
+                # their next run after upgrading the client.
+                return add_property(database_id, "사진")
+        recorded_write(
+            mapping,
+            path,
+            operation,
+            add_photo,
+            lambda _: None,
+            verify=lambda _, database_id=database_id: _verify_photo_schema(client, database_id),
+            idempotency_key=stable_key("schema", mapping.get("template_key"), key, "사진"),
+        )
+    mapping["photo_schema"] = 1
+    write_json(path, mapping)
 
 
 def operation_database_properties() -> Dict[str, Any]:
@@ -2643,6 +2818,7 @@ def _install_unlocked(manifest: Dict[str, Any], client: NotionClient, parent_id:
                        idempotency_key=stable_key("database", mapping.get("template_key"), key, parent))
 
     ensure_idempotency_schema(mapping, mapping_path, client)
+    ensure_photo_schema(mapping, mapping_path, client)
     ensure_operation_log(mapping, mapping_path, client)
     seed_default_rows(manifest, client, mapping, mapping_path)
 

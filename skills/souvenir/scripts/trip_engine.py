@@ -29,6 +29,7 @@ URL_RE = re.compile(r"https?://[^\s|]+", re.I)
 SHORT_MAP_HOSTS = {"maps.app.goo.gl", "goo.gl"}
 SHOPPING_REQUIRED_FIELDS = ("구매 장소", "수량", "예상 금액")
 INPUT_UNKNOWN = "미정"
+IMAGE_INPUT_ALIASES = ("사진", "이미지", "사진 URL", "image_url", "image", "thumbnail", "cover")
 
 # 대화에서 받은 값과 Notion 속성 사이의 단일 계약이다.  호스트는 이
 # 목록을 먼저 사용자에게 보여주고, 답변은 아래 ``property`` 이름으로
@@ -101,6 +102,8 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
             {"name": "예약 상태", "property": "예약 상태", "required": False},
             {"name": "예약번호", "property": "예약번호", "required": False},
             {"name": "확인 링크", "property": "확인 링크", "required": False},
+            {"name": "사진", "property": "사진", "required": False},
+            {"name": "사진 URL", "property": "사진 URL", "required": False},
             {"name": "좌석·수하물", "property": "좌석·수하물", "required": False},
             {"name": "체크인·탑승 마감", "property": "체크인·탑승 마감", "required": False},
         ],
@@ -112,6 +115,8 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
             {"name": "숙소명", "property": "숙소", "required": True},
             {"name": "주소", "property": "주소", "required": False},
             {"name": "숙소 링크", "property": "숙소 링크", "required": False},
+            {"name": "사진", "property": "사진", "required": False},
+            {"name": "사진 URL", "property": "사진 URL", "required": False},
             {"name": "체크인", "property": "체크인", "required": False},
             {"name": "체크아웃", "property": "체크아웃", "required": False},
             {"name": "장점", "property": "장점", "required": False},
@@ -131,6 +136,7 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
             {"name": "종류", "property": "종류", "required": False},
             {"name": "지도 URL", "property": "지도 URL", "required": False},
             {"name": "공식 링크", "property": "공식 링크", "required": False},
+            {"name": "사진", "property": "사진", "required": False},
             {"name": "사진 URL", "property": "사진 URL", "required": False},
             {"name": "예산 메모", "property": "예산 메모", "required": False},
             {"name": "영업시간·휴무", "property": "영업시간·휴무", "required": False},
@@ -150,6 +156,7 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
             {"name": "수량", "property": "수량", "required": True},
             {"name": "예상 금액", "property": "예상 금액", "required": True},
             {"name": "통화", "property": "통화", "required": False},
+            {"name": "사진", "property": "사진", "required": False},
             {"name": "사진 URL", "property": "사진 URL", "required": False},
             {"name": "태그", "property": "태그", "required": False},
             {"name": "결제 수단", "property": "결제 수단", "required": False},
@@ -215,7 +222,7 @@ def input_fields_for(part: str) -> Dict[str, Any]:
 
 def _input_value(row: Dict[str, Any], field: Dict[str, Any]) -> Any:
     property_name = field["property"]
-    aliases = (field["name"], property_name)
+    aliases = IMAGE_INPUT_ALIASES if property_name in {"사진", "사진 URL"} else (field["name"], property_name)
     for alias in aliases:
         if alias in row and row[alias] not in (None, ""):
             return row[alias]
@@ -233,6 +240,20 @@ def _canonical_input_row(part: str, row: Dict[str, Any]) -> Dict[str, Any]:
     # schema name instead of hiding it in a generic note.
     if part == "traveler" and "여행자" not in result and row.get("이름"):
         result["여행자"] = row["이름"]
+    # Keep a source URL alongside a file/attachment reference when the host
+    # supplied only one of them.  The Notion writer uses this pair to render a
+    # card image and retain an auditable source link.
+    if result.get("사진") and not result.get("사진 URL"):
+        photo = result["사진"]
+        if isinstance(photo, dict):
+            photo = photo.get("url") or photo.get("source")
+        elif isinstance(photo, list):
+            photo = next((item.get("url") or item.get("source") if isinstance(item, dict) else item
+                          for item in photo if item), None)
+        if photo:
+            result["사진 URL"] = str(photo)
+    if result.get("사진 URL") and not result.get("사진"):
+        result["사진"] = result["사진 URL"]
     return result
 
 
@@ -314,13 +335,19 @@ def normalize_part_input(part: str, payload: Any, *, start_date: Optional[str] =
         else:
             raise ValueError("일정 입력은 텍스트 또는 행 객체 목록이어야 합니다.")
     elif key == "place":
-        rows = parse_place_lines(payload) if isinstance(payload, str) else [
-            _canonical_input_row(key, item) for item in payload if isinstance(item, dict)
-        ]
+        if isinstance(payload, str):
+            rows = parse_place_lines(payload)
+        elif isinstance(payload, dict):
+            rows = [_canonical_input_row(key, payload)]
+        else:
+            rows = [_canonical_input_row(key, item) for item in payload if isinstance(item, dict)]
     elif key == "shopping":
-        rows = parse_shopping_lines(payload) if isinstance(payload, str) else [
-            _canonical_input_row(key, item) for item in payload if isinstance(item, dict)
-        ]
+        if isinstance(payload, str):
+            rows = parse_shopping_lines(payload)
+        elif isinstance(payload, dict):
+            rows = [_canonical_input_row(key, payload)]
+        else:
+            rows = [_canonical_input_row(key, item) for item in payload if isinstance(item, dict)]
     elif isinstance(payload, dict):
         rows = [_canonical_input_row(key, payload)]
     elif isinstance(payload, (list, tuple)):

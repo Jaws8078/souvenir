@@ -45,12 +45,12 @@ class FakeNotion:
                 return {"id": row_id, "properties": copy.deepcopy(properties)}
         return {"id": database_id, "properties": {ni.IDEMPOTENCY_PROPERTY: {"rich_text": {}}}}
 
-    def add_database_property(self, database_id, name):
+    def add_database_property(self, database_id, name, definition=None):
         for kind, _parent, properties, row_id in self.created:
             if kind == "database" and row_id == database_id:
-                properties[name] = {"rich_text": {}}
+                properties[name] = copy.deepcopy(definition or {"rich_text": {}})
                 return {"id": row_id, "properties": copy.deepcopy(properties)}
-        return {"id": database_id, "properties": {name: {"rich_text": {}}}}
+        return {"id": database_id, "properties": {name: copy.deepcopy(definition or {"rich_text": {}})}}
 
     def create(self, kind, parent, payload):
         self.calls += 1
@@ -193,6 +193,35 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(payload["수량"]["number"], 3)
         self.assertEqual(payload["정보 상태"]["select"]["name"], "사용자 확인 완료")
         self.assertEqual(payload["여행 키"]["rich_text"][0]["text"]["content"], result["trip_id"])
+
+    def test_photo_url_is_written_to_files_and_source_columns(self):
+        self.install()
+        result = self.scaffold(traveler_count=1)
+        saved = ni.save_part_rows(
+            self.manifest, self.client, self.path, result["trip_id"], "숙소",
+            [{"숙소명": "하카타 호텔", "사진 URL": "https://example.com/hakata.jpg"}],
+            confirmed=True,
+        )
+        stay_db = ni.read_json(self.path)["databases"]["stay"]
+        payload = next(payload for kind, parent, payload, row_id in self.client.created
+                       if kind == "row" and parent == stay_db and row_id in saved["created"])
+        self.assertEqual(payload["사진"]["files"][0]["external"]["url"], "https://example.com/hakata.jpg")
+        self.assertEqual(payload["사진 URL"]["url"], "https://example.com/hakata.jpg")
+
+    def test_legacy_named_photo_columns_are_populated(self):
+        row = {"숙소명": "하카타 호텔", "사진 URL": "https://example.com/hakata.jpg"}
+        payload = ni._part_row_properties(
+            self.manifest,
+            "stay",
+            row,
+            "trip-id",
+            "operation-key",
+            {"숙소 사진": {"type": "file"}},
+        )
+        self.assertEqual(
+            payload["숙소 사진"]["files"][0]["external"]["url"],
+            "https://example.com/hakata.jpg",
+        )
 
     def test_traveler_profiles_write_independent_columns_and_are_idempotent(self):
         self.install()
@@ -712,6 +741,10 @@ class InstallerTests(unittest.TestCase):
     def test_null_and_checkbox_values_are_not_coerced(self):
         self.assertEqual(ni.property_value({"type": "rich_text"}, None), {"rich_text": []})
         self.assertEqual(ni.property_value({"type": "select"}, None), {"select": None})
+        self.assertEqual(
+            ni.property_value({"type": "files", "name": "사진"}, "https://example.com/photo.jpg"),
+            {"files": [{"type": "external", "name": "사진", "external": {"url": "https://example.com/photo.jpg"}}]},
+        )
         with self.assertRaises(ni.InstallerError):
             ni.property_value({"type": "checkbox", "name": "완료"}, "false")
         with self.assertRaises(ni.InstallerError):

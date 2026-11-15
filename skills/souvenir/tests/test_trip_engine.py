@@ -49,6 +49,18 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(packet["rows"][0]["항공권 예산"], 300000)
         self.assertEqual(packet["status"], "입력 완료")
 
+    def test_photo_input_is_shared_by_air_stay_place_and_shopping(self):
+        photo = "https://example.com/travel.jpg"
+        for part, payload in (
+            ("항공", {"구간": "가는 편", "출발 공항": "ICN", "도착 공항": "FUK", "사진": photo}),
+            ("숙소", {"숙소명": "하카타 호텔", "사진 URL": photo}),
+            ("장소", {"장소명": "오호리 공원", "사진": photo}),
+            ("쇼핑", {"품목명": "유자 킷캣", "구매 장소": "하카타역", "수량": 1, "예상 금액": 1200, "사진": photo}),
+        ):
+            packet = engine.normalize_part_input(part, payload)
+            self.assertEqual(packet["rows"][0]["사진"], photo)
+            self.assertEqual(packet["rows"][0]["사진 URL"], photo)
+
     def test_organize_schedule_assigns_days_dates_and_times(self):
         rows = engine.organize_schedule(
             "1일차: 공항 도착 | 14:00-16:00 | 공항 | 체크인\n"
