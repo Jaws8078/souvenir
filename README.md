@@ -102,17 +102,6 @@ python3 skills/souvenir/scripts/run_souvenir.py fields --part "여행 개요·�
 
 fallback 설치 경로에서도 같은 계약을 사용합니다. 일정·항공·숙소·장소·예산·준비물은 승인된 정규화 행을 각 DB에 저장하고, 기존 여행의 일차·준비 항목은 중복 생성하지 않고 갱신합니다. 복제 템플릿의 실제 스키마를 다시 읽어 `여행` 관계와 `구분=사용 중` 표시를 함께 반영하므로, 저장된 행이 예전 샘플 필터에 가려지지 않습니다. 사용자는 명령이나 JSON을 직접 입력할 필요가 없고, 호스트가 저장 전 요약과 `반영` 확인을 받은 뒤 실행합니다.
 
-여러 행을 저장할 때는 입력을 먼저 한 번에 정리한 뒤, 대상 DB를 한 번 읽어 작업 키 색인을 만들고 독립 행을 제한 병렬로 반영합니다. 신규 행의 즉시 재조회는 생략하고 파트별 최종 조회로 실제 표시 여부를 확인하므로, 안전한 멱등·충돌 보호는 유지하면서 대기 시간을 줄입니다. 기본 동시 저장 수는 4개이며, 문제가 있는 환경에서는 `SOUVENIR_WRITE_CONCURRENCY=1`로 순차 처리할 수 있습니다. 저장 결과에는 요청 수·재시도 수·단계별 소요 시간을 담은 비밀 없는 `performance` 정보가 포함됩니다.
-
-### 9~12단계 속도 최적화
-
-- **외부 검색 분리**: 장소의 Google Maps 리디렉션·쇼핑 후보 검색은 핵심 입력 정리·Notion 저장과 분리합니다. 먼저 사용자 입력을 빠르게 확인한 뒤 `외부 확인 대기` 작업만 만들고, 검색 근거를 받은 다음 한 번 승인해 저장합니다. 로컬 실행기에서는 `--defer-external` 옵션이 이 모드를 선택합니다.
-- **템플릿 검사 캐시**: 워크스페이스·고정 템플릿 계약·복제본 ID만 비밀 없이 로컬 캐시합니다. 24시간 안에 같은 사본을 다시 실행하면 전체 구조 검사를 반복하지 않고 캐시를 사용하며, 만료·템플릿 변경·검증 실패 때만 전체 검사를 다시 합니다.
-- **HTTP 재사용·재시도 튜닝**: `SOUVENIR_HTTP_TRANSPORT=keepalive`에서 persistent opener를 사용하고, `SOUVENIR_HTTP_TIMEOUT`, `SOUVENIR_HTTP_MAX_RETRIES`, `SOUVENIR_REQUEST_SPACING`으로 환경별 지연·재시도를 조절합니다. 저장 요청의 불확실한 서버 오류는 자동 재전송하지 않습니다.
-- **coordinator 지연 호출**: 기본 `auto` 모드에서는 단일 작성자일 때 중앙 coordinator를 호출하지 않습니다. 여러 세션이 같은 여행을 만질 때만 `SOUVENIR_EXPECT_CONCURRENT=1`을 켜거나, 운영 환경에서 `SOUVENIR_COORDINATOR_MODE=always`를 사용합니다. coordinator를 명시적으로 사용하는데 연결이 실패하면 안전하게 쓰기를 중단합니다.
-
-반복 측정값과 방법은 [성능 메모](docs/concurrency-roadmap.md#7-9-12번-전후-성능-메모--2026-11-15)에 기록해 두었습니다.
-
 ### 지갑은 다섯 칸만 입력
 
 사용 내역의 기본 입력은 `사용처 · 거래 유형 · 결제 단계 · 결제 수단 · 금액`입니다. 사용 금액은 연결된 지갑에서 자동 차감되고, `사용액 · 남은 금액 · 사용률`은 읽기 전용 결과로 표시됩니다. 예정 비용은 실제 지출과 분리합니다.
@@ -123,14 +112,19 @@ fallback 설치 경로에서도 같은 계약을 사용합니다. 일정·항공
 
 ## 여러 사람이 동시에 사용할 때
 
-같은 여행을 두 세션이 동시에 수정하면 중복 저장을 막기 위해 먼저 시작한 작업만 반영합니다.
+같은 여행을 여러 세션에서 동시에 수정해도 다음 보호 장치가 작동합니다.
+
+- 여행별 잠금과 작업 lease로 한 번에 하나의 쓰기만 진행
+- 작업 키로 중복 생성 방지
+- 저장 직전 버전 충돌 확인으로 다른 사람의 최신 수정 보존
+- 충돌한 항목만 다시 확인하고, 메모·예약·다른 날짜는 유지
 
 ```text
 현재 이 여행에 다른 반영 작업이 진행 중입니다.
 기존 작업이 끝난 뒤 다시 시도해주세요.
 ```
 
-충돌이 나도 사용자 메모·예약·다른 날짜는 보존하고, 변경된 항목만 다시 확인합니다. 혼자 사용하는 경우에는 이 보호 기능이 거의 보이지 않습니다. 동시성 설계의 전체 범위는 [동시성 대응 메모](docs/concurrency-roadmap.md)에서 확인할 수 있습니다.
+혼자 사용하는 경우에는 이 보호 기능이 거의 보이지 않습니다. 여러 컴퓨터에서 같은 여행을 함께 편집하는 환경은 선택형 coordinator로 작업 순서를 조정할 수 있습니다. 자세한 설계는 [동시성 대응 메모](docs/concurrency-roadmap.md)에서 확인할 수 있습니다.
 
 ## 템플릿 사용
 
@@ -174,29 +168,6 @@ python3 skills/souvenir/scripts/notion_installer.py install \
 ```
 
 이 경로는 비식별 매니페스트로 구조를 새로 만들며, Notion 네이티브 복제처럼 원본의 모든 폭·뷰·관계·수식을 픽셀 단위로 보존한다고 약속하지 않습니다. 토큰은 채팅·GitHub·매핑 파일에 넣지 않습니다.
-
-## 여러 컴퓨터에서 강한 잠금이 필요할 때
-
-선택형 P2 coordinator를 한 대의 서버에서 실행하면 여행별 lease·heartbeat·작업 큐·멱등 키를 중앙에서 관리할 수 있습니다.
-
-```bash
-export SOUVENIR_COORDINATOR_TOKEN='긴 무작위 토큰'
-python3 skills/souvenir/scripts/coordinator.py serve \
-  --db /var/lib/souvenir/coordinator.sqlite3 \
-  --host 0.0.0.0 \
-  --port 8765
-```
-
-각 컴퓨터에는 다음을 설정합니다.
-
-```bash
-export SOUVENIR_COORDINATOR_URL='https://coordinator.example.com'
-export SOUVENIR_COORDINATOR_TOKEN='긴 무작위 토큰'
-# 여러 기기에서 같은 여행을 동시에 수정하는 경우에만 켭니다.
-export SOUVENIR_EXPECT_CONCURRENT=1
-```
-
-단일 작성자라면 URL이 있어도 `auto` 모드가 coordinator 왕복을 건너뜁니다. 강제로 매번 사용하려면 `SOUVENIR_COORDINATOR_MODE=always`를 설정하세요. coordinator를 사용하기로 한 실행에서 연결이 꺼져 있으면 안전을 위해 Notion 쓰기를 시작하지 않습니다. HTTPS reverse proxy·인증·백업은 [P2 coordinator 가이드](docs/coordinator.md)를 참고합니다.
 
 ## 업데이트와 문제 해결
 
