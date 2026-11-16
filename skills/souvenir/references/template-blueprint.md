@@ -67,7 +67,7 @@ NOTION_TOKEN="secret_..." python3 skills/souvenir/scripts/notion_installer.py in
 |---|---|---|---|
 | trip | `✈️ Souvenir · 여행` | 여행 요약·진행 카드 | 일정, 예약, 준비할 일, 준비물, 숙소, 지갑 |
 | itinerary | `🗓️ Souvenir · 일정` | 입력 표, 일차별 보드, 달력, 시간표 | 여행, 장소, 예약, 장거리 이동, 현지 이동 |
-| place | `🗺️ Souvenir · 장소` | 장소 입력, 갤러리, 종류별 필터 | 여행, 일정 |
+| place | `🗺️ Souvenir · 장소` | 장소 입력, 확인 완료 갤러리, 검토 필요, 종류별 필터, 일정 연결 | 여행, 일정 |
 | shopping | `🛍️ Souvenir · 쇼핑` | 사람별 목록·구매 장소·사진·태그·구매 상태 | 여행, 장소, 지갑 |
 | weather | `🌦️ 지역별 날씨` | 지역·기간 확인 | 여행, 장소 |
 | schedule_check | `⏱️ 일정 비교 검사` | 시간·이동 검사 | 여행, 기준 일정, 비교 일정 |

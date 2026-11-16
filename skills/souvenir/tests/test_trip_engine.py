@@ -263,6 +263,11 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(rows[0]["장소"], "오호리 공원")
         self.assertEqual(engine.normalize_link(rows[0]["지도 URL"])["label"], "Ohori")
         self.assertEqual(engine.parse_place_lines("https://maps.google.com/?query=Ohori")[0]["장소"], "Ohori")
+
+    def test_place_input_contract_exposes_two_stage_notion_structure(self):
+        contract = engine.input_fields_for("장소 보관함")
+        self.assertEqual(contract["notion_structure"]["canonical"]["database_key"], "place")
+        self.assertFalse(contract["notion_structure"]["candidate_review"]["persist_before_approval"])
         with self.assertRaises(ValueError):
             engine.normalize_link("javascript:alert(1)")
 
@@ -337,6 +342,8 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(first["다음 시작"], 10)
         self.assertIn("10곳 더", first["더 필요 질문"])
         self.assertFalse(first["저장 가능"])
+        self.assertFalse(first["Notion 구조"]["candidate_review"]["persist_before_approval"])
+        self.assertEqual(first["Notion 구조"]["canonical"]["database_key"], "place")
 
         reordered = list(reversed(candidates))
         ranked = engine.prepare_place_candidate_page(reordered, "후쿠오카")
@@ -439,6 +446,8 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(saved[0]["장소 ID"], "places/abc")
         self.assertNotIn("Google Maps 제공", saved[0])
         self.assertNotIn("평점", saved[0])
+        self.assertEqual(saved[0]["검색 제공자"], "Google Maps")
+        self.assertEqual(saved[0]["정보 상태"], "사용자 확인 완료")
 
     def test_host_search_fallback_works_without_google_api_key(self):
         packet = engine.prepare_place_confirmation(

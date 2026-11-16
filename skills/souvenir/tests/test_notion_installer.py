@@ -429,6 +429,26 @@ class InstallerTests(unittest.TestCase):
             if kind == "database":
                 self.assertIn(ni.IDEMPOTENCY_PROPERTY, properties)
 
+    def test_old_place_install_is_migrated_without_candidate_database(self):
+        self.install()
+        mapping = ni.read_json(self.path)
+        mapping.pop("place_schema", None)
+        ni.write_json(self.path, mapping)
+        place_db = mapping["databases"]["place"]
+        for kind, _parent, properties, row_id in self.client.created:
+            if kind == "database" and row_id == place_db:
+                for name in ni.PLACE_SCHEMA_PROPERTIES:
+                    properties.pop(name, None)
+        ni.install(self.manifest, self.client, PARENT, self.path)
+        self.assertEqual(ni.read_json(self.path)["place_schema"], ni.PLACE_SCHEMA_VERSION)
+        database_properties = next(
+            properties for kind, _parent, properties, row_id in self.client.created
+            if kind == "database" and row_id == place_db
+        )
+        for name in ni.PLACE_SCHEMA_PROPERTIES:
+            self.assertIn(name, database_properties)
+        self.assertNotIn("place_candidates", ni.read_json(self.path).get("databases", {}))
+
     def test_wrong_parent_or_template_never_writes(self):
         self.install()
         before = self.path.read_bytes()

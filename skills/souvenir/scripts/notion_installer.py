@@ -60,6 +60,27 @@ LEASE_CONFLICT = "충돌"
 LEASE_REVIEW = "확인 필요"
 LEASE_DEFAULT_MINUTES = 10
 
+# 장소 후보 검색은 대화/호스트의 임시 검토 상태로만 유지하고, 승인된
+# 장소만 장소 보관함에 들어가도록 구형 복제본에도 내부 확인 속성을
+# 추가한다.  이 마이그레이션은 매니페스트의 원본 링크·디자인을 바꾸지
+# 않고, 누락된 속성만 원자적으로 보완한다.
+PLACE_SCHEMA_VERSION = 1
+PLACE_SCHEMA_PROPERTIES: Dict[str, Dict[str, Any]] = {
+    "장소 ID": {"rich_text": {}},
+    "정보 상태": {"select": {"options": [
+        {"name": "직접 입력"},
+        {"name": "후보 검토"},
+        {"name": "확인 필요"},
+        {"name": "사용자 확인 완료"},
+    ]}},
+    "검색 제공자": {"select": {"options": [
+        {"name": "사용자 입력"},
+        {"name": "Google Maps"},
+        {"name": "호스트 검색"},
+    ]}},
+    "확인일": {"date": {}},
+}
+
 
 class PerformanceMetrics:
     """Small, secret-free timing recorder for one local operation.
@@ -343,7 +364,12 @@ def check_pending(mapping: Dict[str, Any]) -> None:
 def check_manifest_version(mapping: Dict[str, Any], manifest: Dict[str, Any]) -> None:
     digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     if mapping.get("manifest_digest") not in (None, digest):
-        raise InstallerError("설치 당시와 매니페스트가 다릅니다. 기존 버전으로 재개하거나 새 --mapping을 지정하세요.")
+        # The place review split is an additive, backward-compatible schema
+        # migration.  Older mappings do not have ``place_schema`` yet, so they
+        # may adopt the new manifest and continue through ensure_place_schema.
+        migrations = manifest.get("backward_compatible_migrations", [])
+        if not ("place-review-v1" in migrations and not mapping.get("place_schema")):
+            raise InstallerError("설치 당시와 매니페스트가 다릅니다. 기존 버전으로 재개하거나 새 --mapping을 지정하세요.")
     mapping["manifest_digest"] = digest
 
 
@@ -2121,6 +2147,84 @@ def ensure_photo_schema(mapping: Dict[str, Any], path: Path, client: Any) -> Non
     write_json(path, mapping)
 
 
+def _verify_place_schema(client: Any, database_id: str) -> None:
+    current = client.get_database(database_id)
+    properties = current.get("properties", {}) if isinstance(current, dict) else {}
+    if not isinstance(properties, dict):
+        raise UncertainWriteError("장소 보관함 속성을 저장 후 확인하지 못했습니다.")
+    missing = [name for name in PLACE_SCHEMA_PROPERTIES if name not in properties]
+    if missing:
+        raise UncertainWriteError(
+            "장소 보관함 확인 속성을 저장 후 확인하지 못했습니다: " + ", ".join(missing)
+        )
+
+
+def _verify_place_property(client: Any, database_id: str, property_name: str) -> None:
+    current = client.get_database(database_id)
+    properties = current.get("properties", {}) if isinstance(current, dict) else {}
+    if not isinstance(properties, dict) or property_name not in properties:
+        raise UncertainWriteError(
+            f"장소 보관함 속성을 저장 후 확인하지 못했습니다: {property_name}"
+        )
+
+
+def ensure_place_schema(mapping: Dict[str, Any], path: Path, client: Any) -> None:
+    """Upgrade the place DB without creating a persistent candidate database.
+
+    Search candidates stay in the host's temporary review packet.  The
+    canonical Notion DB only needs small, hidden audit fields so approved rows
+    can be filtered apart from direct/manual entries.  Existing columns and
+    rows are never removed or rewritten.
+    """
+    database_id = (mapping.get("databases") or {}).get("place")
+    if not database_id:
+        return
+    get_database = getattr(client, "get_database", None)
+    add_property = getattr(client, "add_database_property", None)
+    if not callable(get_database) or not callable(add_property):
+        raise InstallerError("장소 후보 구조를 확인하려면 Notion 데이터베이스 읽기·수정 권한이 필요합니다.")
+
+    current = get_database(database_id)
+    properties = current.get("properties", {}) if isinstance(current, dict) else {}
+    if not isinstance(properties, dict):
+        raise InstallerError("장소 보관함 속성을 읽지 못했습니다.")
+
+    for name, definition in PLACE_SCHEMA_PROPERTIES.items():
+        if name in properties:
+            continue
+        operation = f"schema:place:{name}"
+
+        def add_field(name: str = name, definition: Dict[str, Any] = definition) -> Any:
+            try:
+                return add_property(database_id, name, definition)
+            except TypeError:
+                # Older test doubles/clients may not accept a definition.  A
+                # retry on the next run will complete the typed migration.
+                return add_property(database_id, name)
+
+        recorded_write(
+            mapping,
+            path,
+            operation,
+            add_field,
+            lambda _: None,
+            verify=lambda _, database_id=database_id, name=name: _verify_place_property(
+                client, database_id, name
+            ),
+            idempotency_key=stable_key("schema", mapping.get("template_key"), "place", name),
+        )
+        # Refresh the local view so a partially migrated copy is handled
+        # correctly if another process added a field between requests.
+        current = get_database(database_id)
+        properties = current.get("properties", {}) if isinstance(current, dict) else {}
+        if not isinstance(properties, dict):
+            raise InstallerError("장소 보관함 속성을 다시 읽지 못했습니다.")
+
+    _verify_place_schema(client, database_id)
+    mapping["place_schema"] = PLACE_SCHEMA_VERSION
+    write_json(path, mapping)
+
+
 def operation_database_properties() -> Dict[str, Any]:
     return {
         "작업": {"title": {}},
@@ -2819,6 +2923,7 @@ def _install_unlocked(manifest: Dict[str, Any], client: NotionClient, parent_id:
 
     ensure_idempotency_schema(mapping, mapping_path, client)
     ensure_photo_schema(mapping, mapping_path, client)
+    ensure_place_schema(mapping, mapping_path, client)
     ensure_operation_log(mapping, mapping_path, client)
     seed_default_rows(manifest, client, mapping, mapping_path)
 

@@ -50,6 +50,27 @@ GOOGLE_PLACES_FIELD_MASK = ",".join([
 GOOGLE_MAPS_ATTRIBUTION_TEXT = "Google Maps"
 GOOGLE_SEARCH_RANKING_NOTICE = "Google Maps 검색 결과는 주로 관련성·거리·인지도를 함께 반영해 정렬됩니다."
 
+# 장소 검색 결과와 정식 장소 보관함을 분리하기 위한 화면 계약이다.
+# 후보는 이 계약의 ``review`` 상태로만 호스트에 전달되고, 사용자가
+# 표시명을 정해 승인한 뒤에만 ``canonical`` 필드로 저장된다.  이 값은
+# Notion DB를 직접 만들지 않는 호스트에서도 같은 구조를 유지하도록
+# 패킷에 함께 넣는다.
+PLACE_NOTION_STRUCTURE: Dict[str, Any] = {
+    "candidate_review": {
+        "storage": "chat_or_host_ephemeral",
+        "status": "후보 검토",
+        "persist_before_approval": False,
+        "display_fields": ["추천 순위", "장소", "지역", "종류", "지도 URL", "평점", "영업 상태"],
+    },
+    "canonical": {
+        "database_key": "place",
+        "database_title": "🗺️ Souvenir · 장소",
+        "approved_status": "사용자 확인 완료",
+        "storage_fields": ["장소", "장소 ID", "지도 URL", "출처", "정보 상태", "확인일"],
+        "views": ["장소 입력", "확인 완료 갤러리", "검토 필요", "종류별 필터", "일정 연결"],
+    },
+}
+
 # 대화에서 받은 값과 Notion 속성 사이의 단일 계약이다.  호스트는 이
 # 목록을 먼저 사용자에게 보여주고, 답변은 아래 ``property`` 이름으로
 # 분리해 저장해야 한다.  특히 사람별 정보는 ``의견·요청`` 같은 합친
@@ -236,7 +257,10 @@ def input_fields_for(part: str) -> Dict[str, Any]:
     if key not in INPUT_CONTRACTS:
         raise ValueError(f"알 수 없는 입력 파트입니다: {part}")
     contract = INPUT_CONTRACTS[key]
-    return json.loads(json.dumps({"part": key, **contract}, ensure_ascii=False))
+    result = {"part": key, **contract}
+    if key == "place":
+        result["notion_structure"] = PLACE_NOTION_STRUCTURE
+    return json.loads(json.dumps(result, ensure_ascii=False))
 
 
 def _input_value(row: Dict[str, Any], field: Dict[str, Any]) -> Any:
@@ -989,6 +1013,7 @@ def prepare_place_candidate_page(evidence: Sequence[Dict[str, Any]], destination
         "목적지": text(destination),
         "상태": "후보 검토 중" if packet["후보"] else "검색 결과 없음",
         "저장 가능": False,
+        "Notion 구조": json.loads(json.dumps(PLACE_NOTION_STRUCTURE, ensure_ascii=False)),
         "확인 질문": (
             "후보 번호를 골라 저장할까요? 아직 더 필요하면 ‘다음 10개’라고 말해주세요."
             if packet["후보"] else packet["더 필요 질문"]
@@ -1032,6 +1057,7 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
         "Google Maps 표시 고지": GOOGLE_MAPS_ATTRIBUTION_TEXT,
         "검색 순위 안내": GOOGLE_SEARCH_RANKING_NOTICE,
         "정책 상태": "후보 화면에서만 표시 · 저장 전 사용자 입력 라벨 필요",
+        "Notion 구조": json.loads(json.dumps(PLACE_NOTION_STRUCTURE, ensure_ascii=False)),
         "다음 후보 있음": has_more,
         "다음 시작": (base_rank + len(candidates)) if has_more else None,
         "더 필요 질문": (
@@ -1151,6 +1177,7 @@ def confirm_place_rows(packet: Dict[str, Any], approved_places: Sequence[str] = 
                     "장소 ID": row.get("장소 ID"),
                     "지도 URL": row.get("지도 URL"),
                     "출처": GOOGLE_MAPS_ATTRIBUTION_TEXT,
+                    "검색 제공자": GOOGLE_MAPS_ATTRIBUTION_TEXT,
                     "여행지 확인": "사용자 확인 완료",
                     "저장 가능": True,
                     "정보 상태": "사용자 확인 완료",
