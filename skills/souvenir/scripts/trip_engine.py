@@ -45,9 +45,10 @@ GOOGLE_PLACES_FIELD_MASK = ",".join([
     "places.primaryTypeDisplayName",
     "places.currentOpeningHours",
     "places.priceLevel",
-    "places.photos",
     "nextPageToken",
 ])
+GOOGLE_MAPS_ATTRIBUTION_TEXT = "Google Maps"
+GOOGLE_SEARCH_RANKING_NOTICE = "Google Maps 검색 결과는 주로 관련성·거리·인지도를 함께 반영해 정렬됩니다."
 
 # 대화에서 받은 값과 Notion 속성 사이의 단일 계약이다.  호스트는 이
 # 목록을 먼저 사용자에게 보여주고, 답변은 아래 ``property`` 이름으로
@@ -1020,17 +1021,24 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
     packet = prepare_place_candidate_page(candidates, destination, page_size=provider_page_size)
     for index, row in enumerate(packet["후보"]):
         row["추천 순위"] = base_rank + index + 1
+        row["검색 제공자"] = search["source"]
+        row["Google Maps 제공"] = True
+        row["저장 가능"] = False
     next_token = search.get("next_page_token") or ""
     has_more = bool(next_token)
     packet.update({
         "검색어": search["query"],
         "검색 제공자": search["source"],
+        "Google Maps 표시 고지": GOOGLE_MAPS_ATTRIBUTION_TEXT,
+        "검색 순위 안내": GOOGLE_SEARCH_RANKING_NOTICE,
+        "정책 상태": "후보 화면에서만 표시 · 저장 전 사용자 입력 라벨 필요",
         "다음 후보 있음": has_more,
         "다음 시작": (base_rank + len(candidates)) if has_more else None,
         "더 필요 질문": (
             "조건에 맞는 다른 후보를 10곳 더 찾아볼까요?"
             if has_more else "조건에 맞는 후보를 모두 보여드렸어요."
         ),
+        "확인 질문": "후보 번호와 Notion에 표시할 내 이름을 알려주세요. 예: 2번은 ‘오호리 산책’으로 저장해줘",
         # This is host state, not a value to save in Notion or display as a URL.
         "후속 검색 상태": {
             "page_index": page_index + 1 if has_more else None,
@@ -1109,17 +1117,47 @@ def prepare_place_confirmation(content: str, destination: str = "",
     }
 
 
-def confirm_place_rows(packet: Dict[str, Any], approved_places: Sequence[str] = ()) -> List[Dict[str, Any]]:
-    """Apply an explicit user approval to pending place candidates."""
+def confirm_place_rows(packet: Dict[str, Any], approved_places: Sequence[str] = (),
+                       user_labels: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Apply explicit approval while keeping Google content policy-safe.
+
+    Google Places results are review-only.  To store one in Notion, the user
+    must provide their own display label; only that label, the exempt place ID,
+    and a Google Maps link are retained.  Manually entered rows keep the legacy
+    behavior.
+    """
     if not isinstance(packet, dict):
         raise ValueError("장소 확인 패킷이 올바르지 않습니다.")
     approved = {_location_token(item) for item in approved_places if text(item)}
+    labels = {
+        _location_token(key): text(value_)
+        for key, value_ in (user_labels or {}).items()
+        if text(key) and text(value_)
+    }
     result: List[Dict[str, Any]] = []
     for raw in packet.get("장소", []):
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
         if _location_token(row.get("장소")) in approved:
+            if row.get("Google Maps 제공"):
+                label = labels.get(_location_token(row.get("장소")))
+                if not label:
+                    # A Google name/address/rating must not silently become a
+                    # durable Notion record.  The host asks for a user label.
+                    continue
+                safe_row = {
+                    "장소": label,
+                    "장소 ID": row.get("장소 ID"),
+                    "지도 URL": row.get("지도 URL"),
+                    "출처": GOOGLE_MAPS_ATTRIBUTION_TEXT,
+                    "여행지 확인": "사용자 확인 완료",
+                    "저장 가능": True,
+                    "정보 상태": "사용자 확인 완료",
+                    "정책 상태": "사용자 입력 라벨로 저장",
+                }
+                result.append({key: value_ for key, value_ in safe_row.items() if value_ not in (None, "")})
+                continue
             row["여행지 확인"] = "사용자 확인 완료"
             row["저장 가능"] = True
             row.pop("추가 확인", None)
@@ -2082,6 +2120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--defer-external", action="store_true",
                         help="외부 지도·검색을 분리하고 조회 작업만 반환")
     parser.add_argument("--approved-places", help="확인 후 저장을 허용할 장소명(쉼표 구분)")
+    parser.add_argument("--place-labels", help="Google 후보를 저장할 사용자 표시명 JSON")
     parser.add_argument("--traveler", help="확인된 쇼핑 행의 담당 여행자")
     parser.add_argument("--confirm", action="store_true", help="선택한 후보를 사용자 확인 완료로 표시")
     parser.add_argument("--destination", help="shopping 조사 검색어에 넣을 목적지")
@@ -2178,9 +2217,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     candidate_page_size=args.candidate_page_size,
                 )
             if args.approved_places:
+                user_labels: Dict[str, str] = {}
+                if args.place_labels:
+                    loaded_labels = json.loads(args.place_labels)
+                    if not isinstance(loaded_labels, dict):
+                        raise ValueError("place-labels는 후보명과 사용자 표시명의 JSON 객체여야 합니다.")
+                    user_labels = {text(key): text(value_) for key, value_ in loaded_labels.items()}
                 packet["승인된 장소"] = confirm_place_rows(
                     packet,
                     [item.strip() for item in args.approved_places.split(",") if item.strip()],
+                    user_labels,
                 )
             result = packet
         elif args.command == "shopping":

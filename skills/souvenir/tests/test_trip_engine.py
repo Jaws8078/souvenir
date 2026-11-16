@@ -394,6 +394,7 @@ class TripEngineTests(unittest.TestCase):
             result = engine.google_places_text_search("후쿠오카 공원", "secret-key")
         request = opener.call_args.args[0]
         self.assertEqual(request.get_header("X-goog-api-key"), "secret-key")
+        self.assertNotIn("places.photos", request.get_header("X-goog-fieldmask"))
         self.assertEqual(result["candidates"][0]["name"], "오호리 공원")
         self.assertEqual(result["candidates"][0]["photo_resource"], "places/abc/photos/1")
         self.assertEqual(result["next_page_token"], "opaque-next-token")
@@ -417,6 +418,27 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual([row["추천 순위"] for row in packet["후보"]], list(range(11, 21)))
         self.assertTrue(packet["다음 후보 있음"])
         self.assertEqual(packet["후속 검색 상태"]["page_token"], "next-token")
+
+    def test_google_candidates_need_user_label_before_notion_save(self):
+        packet = {
+            "장소": [{
+                "장소": "Google 장소명",
+                "장소 ID": "places/abc",
+                "지도 URL": "https://maps.google.com/?cid=abc",
+                "Google Maps 제공": True,
+                "저장 가능": False,
+            }]
+        }
+        self.assertEqual(engine.confirm_place_rows(packet, ["Google 장소명"]), [])
+        saved = engine.confirm_place_rows(
+            packet,
+            ["Google 장소명"],
+            {"Google 장소명": "내 여행 장소"},
+        )
+        self.assertEqual(saved[0]["장소"], "내 여행 장소")
+        self.assertEqual(saved[0]["장소 ID"], "places/abc")
+        self.assertNotIn("Google Maps 제공", saved[0])
+        self.assertNotIn("평점", saved[0])
 
     def test_shopping_import_preserves_optional_fields(self):
         rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")

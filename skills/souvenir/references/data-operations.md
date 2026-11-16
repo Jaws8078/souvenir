@@ -59,6 +59,10 @@ Notion 연결이 확인되면 먼저 [고정 템플릿 게이트](template-gate.
 
 장소 링크 해석과 쇼핑 후보 검색은 핵심 저장 경로에서 분리한다. 입력 파서는 짧은 시간 안에 원문과 `외부 조회 필요` 작업만 만들고, 호스트가 웹·지도·이미지 도구로 근거를 모은 뒤 사용자 확인을 받아 저장한다. 장소 검색 결과는 추천순 최대 10개씩 페이지로 반환하고, 사용자가 더 요청한 경우에만 다음 10개를 조회한다. 로컬 실행기에 사용자가 제공한 `GOOGLE_PLACES_API_KEY`가 있을 때만 Places API (New) Text Search를 직접 호출하며, 페이지 토큰은 세션 상태로만 유지하고 키·토큰을 Notion에 저장하지 않는다. `run_souvenir.py places|shopping --defer-external`은 이 대기 패킷을 반환하며, 근거 없는 후보는 장소·쇼핑 DB에 쓰지 않는다.
 
+### Google Maps 정책 경계
+
+Google Places 후보는 검색 화면에서만 임시로 보여준다. Google 응답의 장소명·주소·평점·영업시간·사진·리뷰를 그대로 Notion에 복사하거나 자체 목록으로 재배포하지 않는다. 저장 가능한 기본값은 사용자가 직접 입력한 표시명, Google `place_id`(저장 예외), Google Maps 링크와 출처 고지뿐이다. API 후보를 Notion에 남기려면 사용자가 자신의 표시명을 별도로 입력해야 하며, 사진·리뷰는 작성자 attribution과 Google Maps 원문 링크를 표시할 UI가 준비되지 않은 한 요청하지 않는다. 검색 카드에는 `Google Maps` 출처와 검색 순위 안내를 함께 표시한다. 자세한 정책은 [Google Places API 정책·attribution](https://developers.google.com/maps/documentation/places/web-service/policies)을 따른다.
+
 고정 템플릿 게이트는 워크스페이스 ID와 템플릿 계약 해시를 키로 검증된 사본의 ID·URL·확인 시각만 `.souvenir-template-cache.json`에 보관한다. 기본 TTL은 24시간이며, 개인 페이지 내용·토큰·쿠키는 저장하지 않는다. 캐시가 만료되거나 링크 계약이 바뀌면 전체 구조 검사를 다시 한다.
 
 fallback `NotionClient`는 기본 urllib 전송을 유지해 호환성을 보장하고, `SOUVENIR_HTTP_TRANSPORT=keepalive`에서 persistent opener를 사용한다. 재시도 횟수·타임아웃·요청 간격은 `SOUVENIR_HTTP_MAX_RETRIES`, `SOUVENIR_HTTP_TIMEOUT`, `SOUVENIR_REQUEST_SPACING`으로 조절한다.

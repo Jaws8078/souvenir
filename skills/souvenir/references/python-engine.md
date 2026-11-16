@@ -74,7 +74,15 @@ python3 skills/souvenir/scripts/run_souvenir.py places \
 GOOGLE_PLACES_API_KEY="secret_..." \
 python3 skills/souvenir/scripts/run_souvenir.py places \
   --destination 후쿠오카 --google-query '후쿠오카 관광지' --pretty
+
+# Google 후보를 저장할 때는 사용자가 직접 정한 표시명을 함께 전달한다.
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 --google-query '후쿠오카 관광지' \
+  --approved-places '오호리 공원' \
+  --place-labels '{"오호리 공원":"후쿠오카 아침 산책"}' --pretty
 ```
+
+Google 후보는 화면 검토용이며, 정책상 장소명·주소·평점·영업시간·사진·리뷰를 그대로 영구 저장하지 않는다. `place_id`와 지도 링크를 제외한 값은 사용자 확인·입력으로 대체하고, Google Maps attribution과 검색 순위 안내를 유지한다.
 
 단축 링크도 같은 방식으로 가져올 수 있다. 네트워크에서 최종 주소를 확인할 수 없을 때는 저장하지 않고 확인 요청용 결과를 만든다.
 
