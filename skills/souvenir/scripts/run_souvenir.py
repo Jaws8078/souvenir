@@ -50,6 +50,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "transport": os.environ.get("SOUVENIR_HTTP_TRANSPORT", "urllib"),
                         "max_retries": os.environ.get("SOUVENIR_HTTP_MAX_RETRIES", "3"),
                     },
+                    "google_places": {
+                        "configured": bool(os.environ.get("GOOGLE_PLACES_API_KEY")),
+                        "mode": "direct-api" if os.environ.get("GOOGLE_PLACES_API_KEY") else "host-fallback",
+                        "key_source": "environment-only",
+                    },
                     "template_gate": {
                         "entrypoint": str(SCRIPT_DIR / "template_gate.py"),
                         "local_notion_preflight": detect_local_notion(),

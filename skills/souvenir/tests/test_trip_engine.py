@@ -3,6 +3,7 @@ import csv
 import importlib.util
 import json
 import tempfile
+import time
 import unittest
 import urllib.error
 from datetime import datetime
@@ -27,6 +28,13 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(unavailable["error_code"], "EXTERNAL_UNAVAILABLE")
         self.assertTrue(unavailable["retryable"])
         self.assertIn("다시", unavailable["next_action"])
+
+        google_unavailable = engine.error_packet(
+            engine.GooglePlacesError("Google API timeout", "GOOGLE_UNAVAILABLE", True),
+            "places",
+        )
+        self.assertEqual(google_unavailable["error_code"], "GOOGLE_UNAVAILABLE")
+        self.assertTrue(google_unavailable["retryable"])
 
     def test_input_contract_lists_every_person_field_separately(self):
         contract = engine.input_fields_for("여행 개요·취향")
@@ -457,11 +465,154 @@ class TripEngineTests(unittest.TestCase):
             packet = engine.prepare_google_place_candidate_page(
                 "후쿠오카 관광지", "secret-key", "후쿠오카", page_index=1,
                 page_token="previous-token",
+                session_state={
+                    "page_token": "previous-token",
+                    "page_index": 1,
+                    "query": "후쿠오카 관광지",
+                    "language_code": "ko",
+                    "region_code": "",
+                    "open_now": None,
+                    "rank_preference": "RELEVANCE",
+                    "included_type": "",
+                    "location_bias": {},
+                    "summary_only": False,
+                    "page_size": 10,
+                    "issued_at": time.time(),
+                },
             )
         search.assert_called_once()
         self.assertEqual([row["추천 순위"] for row in packet["후보"]], list(range(11, 21)))
         self.assertTrue(packet["다음 후보 있음"])
         self.assertEqual(packet["후속 검색 상태"]["page_token"], "next-token")
+
+    def test_google_place_page_marks_destination_mismatch_and_requires_session_match(self):
+        with patch.object(
+            engine, "google_places_text_search",
+            return_value={
+                "query": "후쿠오카 관광지",
+                "source": "Google Places API (New)",
+                "next_page_token": "",
+                "candidates": [{"name": "도쿄 타워", "region": "도쿄도"}],
+            },
+        ):
+            packet = engine.prepare_google_place_candidate_page(
+                "후쿠오카 관광지", "secret-key", "후쿠오카"
+            )
+        self.assertEqual(packet["후보"][0]["여행지 확인"], "불일치")
+        self.assertEqual(engine.confirm_place_rows(
+            {"장소": [{
+                "장소": "도쿄 타워", "장소 ID": "places/tokyo", "추천 순위": 1,
+                "지역": "도쿄도", "Google Maps 제공": True,
+                "여행지 확인": "불일치",
+            }]},
+            ["1"], {"1": "도쿄 타워"},
+        ), [])
+        with self.assertRaisesRegex(ValueError, "세션 상태"):
+            engine.prepare_google_place_candidate_page(
+                "후쿠오카 관광지", "secret-key", "후쿠오카", page_token="stale-token"
+            )
+
+    def test_google_duplicate_names_require_rank_or_place_id(self):
+        packet = {"장소": [
+            {"장소": "스타벅스", "장소 ID": "places/a", "추천 순위": 1,
+             "Google Maps 제공": True, "여행지 확인": "확인 완료"},
+            {"장소": "스타벅스", "장소 ID": "places/b", "추천 순위": 2,
+             "Google Maps 제공": True, "여행지 확인": "확인 완료"},
+        ]}
+        self.assertEqual(engine.confirm_place_rows(packet, ["스타벅스"], {
+            "스타벅스": "내 카페"
+        }), [])
+        saved = engine.confirm_place_rows(packet, ["2"], {"2": "두 번째 카페"})
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["장소"], "두 번째 카페")
+
+    def test_google_summary_mode_uses_minimal_field_mask(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"places": []}).encode("utf-8")
+
+        with patch.object(engine.urllib.request, "urlopen", return_value=FakeResponse()) as opener:
+            engine.google_places_text_search("후쿠오카 공원", "secret-key", summary_only=True)
+        self.assertEqual(
+            opener.call_args.args[0].get_header("X-goog-fieldmask"),
+            engine.GOOGLE_PLACES_SUMMARY_FIELD_MASK,
+        )
+
+    def test_google_search_options_are_sent_without_exposing_key(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"places": []}).encode("utf-8")
+
+        with patch.object(engine.urllib.request, "urlopen", return_value=FakeResponse()) as opener:
+            engine.google_places_text_search(
+                "후쿠오카 카페",
+                "secret-key",
+                rank_preference="DISTANCE",
+                included_type="cafe",
+                location_bias={"circle": {"center": {"latitude": 33.59, "longitude": 130.40}, "radius": 1200}},
+                open_now=True,
+            )
+        request = opener.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["rankPreference"], "DISTANCE")
+        self.assertEqual(body["includedType"], "cafe")
+        self.assertTrue(body["openNow"])
+        self.assertIn("locationBias", body)
+        self.assertNotIn("secret-key", request.data.decode("utf-8"))
+
+    def test_google_http_errors_are_classified_and_secret_is_redacted(self):
+        cases = ((401, "GOOGLE_AUTH", False), (429, "GOOGLE_RATE_LIMIT", True), (503, "GOOGLE_UNAVAILABLE", True))
+        for status, expected_code, retryable in cases:
+            with self.subTest(status=status):
+                error = urllib.error.HTTPError(
+                    engine.GOOGLE_PLACES_ENDPOINT,
+                    status,
+                    "provider error",
+                    {"Content-Type": "application/json"},
+                    None,
+                )
+                error.read = lambda _size=-1: json.dumps({
+                    "error": {"message": "bad secret-key response"}
+                }).encode("utf-8")
+                with patch.object(engine.urllib.request, "urlopen", side_effect=error):
+                    with self.assertRaises(engine.GooglePlacesError) as raised:
+                        engine.google_places_text_search("후쿠오카", "secret-key")
+                self.assertEqual(raised.exception.error_code, expected_code)
+                self.assertEqual(raised.exception.retryable, retryable)
+                self.assertNotIn("secret-key", str(raised.exception))
+
+    def test_google_page_token_rejects_expired_search_session(self):
+        with self.assertRaisesRegex(ValueError, "만료"):
+            engine.prepare_google_place_candidate_page(
+                "후쿠오카 관광지", "secret-key", "후쿠오카", page_index=1,
+                page_token="expired-token",
+                session_state={
+                    "page_token": "expired-token",
+                    "page_index": 1,
+                    "query": "후쿠오카 관광지",
+                    "language_code": "ko",
+                    "region_code": "",
+                    "open_now": None,
+                    "rank_preference": "RELEVANCE",
+                    "included_type": "",
+                    "location_bias": {},
+                    "summary_only": False,
+                    "page_size": 10,
+                    "issued_at": time.time() - engine.GOOGLE_PAGE_TOKEN_TTL_SECONDS - 1,
+                },
+            )
 
     def test_google_candidates_need_user_label_before_notion_save(self):
         packet = {

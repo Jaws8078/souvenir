@@ -31,7 +31,8 @@
           "Create Notion travel plans",
           "Update itineraries with confirmation",
           "Manage reservations, stays, budgets, and packing tasks",
-          "Run local travel checks and calculations"
+          "Run local travel checks and calculations",
+          "Search and review Google Places candidates when a user-provided key is configured"
         ],
         "defaultPrompt": [
           "Souvenir 설치 시작 — Notion 연결 확인",

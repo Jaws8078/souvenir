@@ -10,7 +10,7 @@
 - `import`: 표준 라이브러리만 사용해 UTF-8 CSV, JSON, iCalendar(`.ics`), 텍스트 장소 목록과 지도 링크를 읽는다. Google Maps 공유 단축 링크(`maps.app.goo.gl`, `goo.gl/maps`)는 리디렉션을 따라 최종 주소에서 장소명을 추출한다. 링크가 만료·차단돼 해석되지 않으면 호스트명을 장소명으로 저장하지 않고 `확인 필요` 상태를 반환한다. PDF·이미지 OCR은 별도 승인과 도구가 필요한 후속 범위다.
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약과 `progress` 집계를 읽기 전용 화면용 JSON으로 만든다. 진행도는 일정·예약·할 일·준비물(선택한 경우 쇼핑)의 **완료 건수 ÷ 유효 대상 건수**로 다시 계산하며 취소·환불·제외는 분모에서도 뺀다. `진행도 수동 완료`/`직접 완료`는 자동 상태보다 우선하고 `자동 제외`는 자동 완료를 보류 상태로 되돌린다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 - `shopping`: 품목명만 받은 요청을 조사 후보 확인 패킷으로 만들거나, 외부 검색 결과 JSON에서 선택한 후보를 `사용자 확인 완료` 상태의 저장 준비 행으로 정규화한다. 검색 자체는 호스트의 웹·이미지 도구가 수행하고, 엔진은 값을 추정하지 않는다.
-- `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다. 검색 결과만 `--evidence-input`으로 넣으면 추천순 최대 10개씩 후보를 보여주고 `--candidate-offset 10`으로 다음 10개를 요청할 수 있다. 결과가 10개보다 적으면 있는 만큼만 반환한다. `GOOGLE_PLACES_API_KEY`가 있는 로컬 실행기에서는 Places API (New) Text Search를 명시적으로 호출해 같은 후보 패킷을 만들 수 있고, 다음 묶음은 응답의 페이지 토큰으로 이어간다. 키는 결과·Notion에 저장하지 않는다. `--defer-external`을 사용하면 단축 지도 링크 해석을 기다리지 않고 `외부 조회` 작업만 반환한다.
+- `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다. 검색 결과만 `--evidence-input`으로 넣으면 추천순 최대 10개씩 후보를 보여주고 `--candidate-offset 10`으로 다음 10개를 요청할 수 있다. 결과가 10개보다 적으면 있는 만큼만 반환한다. `GOOGLE_PLACES_API_KEY`가 있는 로컬 실행기에서는 Places API (New) Text Search를 명시적으로 호출해 같은 후보 패킷을 만들 수 있고, 다음 묶음은 이전 검색 세션 JSON과 페이지 토큰을 함께 검증한 뒤 이어간다. 키는 결과·Notion에 저장하지 않으며 CLI 인자로 받지 않는다. `--google-rank DISTANCE`, `--google-included-type`, 위치 반경·영업 중 필터와 `--google-summary-only`로 검색 조건과 비용을 조절할 수 있다. Google API 오류는 인증·쿼터·네트워크·응답 형식별 코드로 반환한다. `--defer-external`을 사용하면 단축 지도 링크 해석을 기다리지 않고 `외부 조회` 작업만 반환한다.
 - `fields`: 각 파트의 전체 저장 계약과 함께 기본 질문용 `question_fields`, 상세용 `optional_fields`, 대상 DB를 반환한다. 호스트는 기본 질문에서 `question_fields`만 사용하고, `normalize_part_input`은 답변을 해당 DB의 속성명으로 분리하며, 사람별 `의견·요청` 합치기 입력은 거부한다.
 - 외부 검색은 엔진이 임의로 실행하지 않는다. `shopping --defer-external`은 품목·목적지 검색 작업을 반환하고, 호스트가 조사한 후보를 다시 넣은 뒤 승인 패킷을 만든다.
 - fallback 설치기는 승인된 정규화 행을 `part-save --part <파트> --confirm`으로 해당 DB에 저장한다. 일정은 기존 `일차` 행을 재사용하고, 항공·숙소·장소·예산·준비물도 각 DB의 제목·속성에 직접 매핑한다.
@@ -70,16 +70,22 @@ python3 skills/souvenir/scripts/run_souvenir.py places \
   --candidate-offset 10 --candidate-page-size 10 --pretty
 
 # Google Places API (New)를 직접 쓰는 선택 경로. 키는 환경변수로만 전달하고
-# 응답의 `후속 검색 상태.page_token`은 호스트가 보관해 다음 10개 요청에 사용한다.
+# 응답의 `후속 검색 상태` 전체를 호스트가 보관해 다음 10개 요청에 사용한다.
 GOOGLE_PLACES_API_KEY="secret_..." \
 python3 skills/souvenir/scripts/run_souvenir.py places \
-  --destination 후쿠오카 --google-query '후쿠오카 관광지' --pretty
+  --destination 후쿠오카 --google-query '후쿠오카 관광지' \
+  --google-rank RELEVANCE --google-summary-only --pretty
+
+# 다음 묶음은 같은 query·필터·page token을 가진 검색 세션 상태를 그대로 넘긴다.
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 --google-query '후쿠오카 관광지' \
+  --google-session-state '<이전 응답의 후속 검색 상태 JSON>' --pretty
 
 # Google 후보를 저장할 때는 사용자가 직접 정한 표시명을 함께 전달한다.
 python3 skills/souvenir/scripts/run_souvenir.py places \
   --destination 후쿠오카 --google-query '후쿠오카 관광지' \
-  --approved-places '오호리 공원' \
-  --place-labels '{"오호리 공원":"후쿠오카 아침 산책"}' --pretty
+  --approved-places '2' \
+  --place-labels '{"2":"후쿠오카 아침 산책"}' --pretty
 ```
 
 Google 후보는 화면 검토용이며, 정책상 장소명·주소·평점·영업시간·사진·리뷰를 그대로 영구 저장하지 않는다. `place_id`와 지도 링크를 제외한 값은 사용자 확인·입력으로 대체하고, Google Maps attribution과 검색 순위 안내를 유지한다.
