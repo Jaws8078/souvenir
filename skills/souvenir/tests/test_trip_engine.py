@@ -25,6 +25,21 @@ class TripEngineTests(unittest.TestCase):
         )
         self.assertNotIn("의견·요청", [field["property"] for field in contract["fields"]])
 
+    def test_input_contract_separates_minimal_and_optional_questions(self):
+        contract = engine.input_fields_for("여행 개요·취향")
+        self.assertEqual(
+            [field["property"] for field in contract["question_fields"]],
+            ["여행자", "역할"],
+        )
+        optional_food = next(field for field in contract["optional_fields"] if field["property"] == "먹고 싶은 음식")
+        self.assertFalse(optional_food["required"])
+        self.assertFalse(optional_food["input_required"])
+        place = engine.input_fields_for("장소 보관함")
+        self.assertEqual(
+            [field["property"] for field in place["question_fields"]],
+            ["장소", "지역", "종류", "지도 URL"],
+        )
+
     def test_traveler_profiles_are_split_and_missing_values_are_explicit(self):
         rows = engine.parse_traveler_profiles(
             "유성 | 총괄 | 라멘 | 지하철 | 역 근처 | 견과류 알레르기 | 늦은 밤 일정 제외\n"
@@ -48,6 +63,16 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(packet["databases"], ["long_transport", "reservation"])
         self.assertEqual(packet["rows"][0]["항공권 예산"], 300000)
         self.assertEqual(packet["status"], "입력 완료")
+        self.assertEqual(packet["question_fields"][:3], ["구간", "출발 공항", "도착 공항"])
+
+    def test_minimal_traveler_input_does_not_require_optional_preferences(self):
+        packet = engine.normalize_part_input(
+            "여행 개요·취향",
+            {"여행자": "유성", "역할": "총괄"},
+        )
+        self.assertEqual(packet["status"], "입력 완료")
+        self.assertEqual(packet["missing"], [])
+        self.assertIn("먹고 싶은 음식", packet["optional_fields"])
 
     def test_photo_input_is_shared_by_air_stay_place_and_shopping(self):
         photo = "https://example.com/travel.jpg"

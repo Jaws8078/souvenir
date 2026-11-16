@@ -240,6 +240,40 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# 기본 질문에서 먼저 받는 최소 필드다.  전체 DB 계약은 보존하지만,
+# 사용자는 아래 값만으로 행을 만들고 나머지는 필요할 때만 펼친다.
+MINIMAL_INPUT_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "trip": ("목적지", "출발일", "종료일", "기간(일)", "인원", "기준 통화"),
+    "traveler": ("여행자", "역할"),
+    "itinerary": ("일정", "일차", "장소"),
+    "air": ("구간", "출발 공항", "도착 공항", "선호 시간대", "항공권 예산"),
+    "stay": ("숙소", "숙소 링크"),
+    "place": ("장소", "지역", "종류", "지도 URL"),
+    "shopping": ("품목", "담당 여행자", "구매 장소", "수량", "예상 금액"),
+    "budget": ("지갑", "통화", "준비 금액"),
+    "preparation": ("할 일",),
+}
+
+
+def _question_fields(contract_key: str, *, optional: bool = False) -> List[Dict[str, Any]]:
+    """Return the compact user-facing fields without changing storage routing."""
+    contract = INPUT_CONTRACTS[contract_key]
+    minimal = set(MINIMAL_INPUT_FIELDS.get(contract_key, ()))
+    fields: List[Dict[str, Any]] = []
+    for field in contract["fields"]:
+        is_minimal = field.get("property") in minimal
+        if optional == is_minimal:
+            continue
+        view_field = dict(field)
+        # ``required`` describes the complete storage contract.  The
+        # optional view must not make a detail field look mandatory to the
+        # host, even when a legacy contract marked it required.
+        if optional:
+            view_field["required"] = False
+        view_field["input_required"] = bool(is_minimal and field.get("required"))
+        fields.append(view_field)
+    return fields
+
 PART_ALIASES = {
     "기본 정보": "trip", "기본 여행 정보": "trip", "여행 정보": "trip", "여행": "trip", "여행 개요": "traveler",
     "여행 개요·취향": "traveler", "취향": "traveler", "동행자": "traveler",
@@ -257,7 +291,13 @@ def input_fields_for(part: str) -> Dict[str, Any]:
     if key not in INPUT_CONTRACTS:
         raise ValueError(f"알 수 없는 입력 파트입니다: {part}")
     contract = INPUT_CONTRACTS[key]
-    result = {"part": key, **contract}
+    result = {
+        "part": key,
+        **contract,
+        "question_fields": _question_fields(key),
+        "optional_fields": _question_fields(key, optional=True),
+        "input_rule": "기본 질문은 question_fields만 먼저 받고, optional_fields는 사용자가 원할 때 펼칩니다.",
+    }
     if key == "place":
         result["notion_structure"] = PLACE_NOTION_STRUCTURE
     return json.loads(json.dumps(result, ensure_ascii=False))
@@ -397,13 +437,23 @@ def normalize_part_input(part: str, payload: Any, *, start_date: Optional[str] =
         rows = [_canonical_input_row(key, item) for item in payload if isinstance(item, dict)]
     else:
         raise ValueError(f"{contract['label']} 입력은 필드별 객체 또는 객체 목록이어야 합니다.")
-    required_properties = [field["property"] for field in contract["fields"] if field.get("required")]
+    # ``required`` describes the full storage contract, while the default
+    # conversation only requires the compact question set.  Optional detail
+    # fields may therefore be absent without blocking a first save.
+    minimal_properties = set(MINIMAL_INPUT_FIELDS.get(key, ()))
+    required_properties = [
+        field["property"]
+        for field in contract["fields"]
+        if field.get("required") and field["property"] in minimal_properties
+    ]
     missing = sorted({field for row in rows for field in required_properties if row.get(field) in (None, "")})
     return {
         "part": key,
         "label": contract["label"],
         "databases": contract["databases"],
         "questions": [field["name"] for field in contract["fields"]],
+        "question_fields": [field["name"] for field in contract["question_fields"]],
+        "optional_fields": [field["name"] for field in contract["optional_fields"]],
         "rows": rows,
         "missing": missing,
         "status": "확인 필요" if missing else "입력 완료",
