@@ -21,7 +21,9 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -485,45 +487,84 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.local_status:
-        print(json.dumps(detect_local_notion(), ensure_ascii=False, indent=2 if args.pretty else None))
-        return 0
-    source = load_source(args.source)
-    state: Dict[str, Any] = {}
-    if args.state:
-        with args.state.open("r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
-        if not isinstance(loaded, dict):
-            raise ValueError("상태 JSON의 최상위 값은 객체여야 합니다.")
-        state = loaded
-    if args.command == "plan":
-        cached = cached_copy(state, source, cache=load_cache(args.cache))
-        if cached:
-            state = {
-                **state,
-                "copy_checked": True,
-                "valid_copy": True,
-                "template_status": "confirmed",
-                "template_page_id": cached["template_page_id"],
-                "template_page_url": cached["template_page_url"],
-                "template_workspace_id": cached["template_workspace_id"],
-                "cache_mode": "cached",
-            }
-        result = next_action(state, args.capability, source, args.local_notion)
-        if cached:
-            result["cache_hit"] = True
-            result["cache_checked_at"] = cached.get("checked_at")
+def _safe_error_message(exc: Exception, fallback: str) -> str:
+    """Keep gate errors readable without leaking local IDs or URLs."""
+    message = str(exc).strip()
+    message = re.sub(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", "[id 숨김]", message, flags=re.I)
+    message = re.sub(r"https?://\S+", "[url 숨김]", message)
+    message = re.sub(r"(?:(?:[A-Za-z]:)?/)[^\s]+", "[경로 숨김]", message)
+    return message or fallback
+
+
+def error_packet(exc: Exception, command: str = "template-gate") -> Dict[str, Any]:
+    """Return a stable, secret-free gate error for the host to render."""
+    if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, KeyError)):
+        code, retryable = "TEMPLATE_INPUT_ERROR", False
+        next_action = "템플릿 상태·이벤트 입력을 확인한 뒤 다시 시도하세요."
+    elif isinstance(exc, OSError):
+        code, retryable = "TEMPLATE_IO_ERROR", True
+        next_action = "템플릿 링크·상태 파일 경로와 권한을 확인한 뒤 다시 시도하세요."
     else:
-        if not args.event_name:
-            raise ValueError("event에는 --event가 필요합니다.")
-        payload = json.loads(args.payload) if args.payload else {}
-        result = apply_event(state, args.event_name, payload)
-        if args.event_name == "copy_validated" and result.get("valid_copy"):
-            record_cache(result, source, path=args.cache)
-    print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
-    return 0
+        code, retryable = "TEMPLATE_GATE_ERROR", False
+        next_action = "복제를 진행하지 않고 오류 내용을 확인한 뒤 다시 시작하세요."
+    return {
+        "ok": False,
+        "error_code": code,
+        "retryable": retryable,
+        "stage": command,
+        "message": _safe_error_message(exc, "템플릿 게이트를 처리하지 못했습니다."),
+        "next_action": next_action,
+    }
+
+
+def emit_error(packet: Dict[str, Any]) -> None:
+    print(f"오류 [{packet['error_code']}]: {packet['message']}", file=sys.stderr)
+    print(f"다음 할 일: {packet['next_action']}", file=sys.stderr)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        args = build_parser().parse_args(argv)
+        if args.local_status:
+            print(json.dumps(detect_local_notion(), ensure_ascii=False, indent=2 if args.pretty else None))
+            return 0
+        source = load_source(args.source)
+        state: Dict[str, Any] = {}
+        if args.state:
+            with args.state.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if not isinstance(loaded, dict):
+                raise ValueError("상태 JSON의 최상위 값은 객체여야 합니다.")
+            state = loaded
+        if args.command == "plan":
+            cached = cached_copy(state, source, cache=load_cache(args.cache))
+            if cached:
+                state = {
+                    **state,
+                    "copy_checked": True,
+                    "valid_copy": True,
+                    "template_status": "confirmed",
+                    "template_page_id": cached["template_page_id"],
+                    "template_page_url": cached["template_page_url"],
+                    "template_workspace_id": cached["template_workspace_id"],
+                    "cache_mode": "cached",
+                }
+            result = next_action(state, args.capability, source, args.local_notion)
+            if cached:
+                result["cache_hit"] = True
+                result["cache_checked_at"] = cached.get("checked_at")
+        else:
+            if not args.event_name:
+                raise ValueError("event에는 --event가 필요합니다.")
+            payload = json.loads(args.payload) if args.payload else {}
+            result = apply_event(state, args.event_name, payload)
+            if args.event_name == "copy_validated" and result.get("valid_copy"):
+                record_cache(result, source, path=args.cache)
+        print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
+        return 0
+    except Exception as exc:
+        emit_error(error_packet(exc, argv[0] if argv and argv else "template-gate"))
+        return 2
 
 
 if __name__ == "__main__":

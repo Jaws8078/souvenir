@@ -209,6 +209,75 @@ def configure_output() -> None:
                 pass
 
 
+def _safe_error_message(exc: Exception, fallback: str) -> str:
+    """Keep useful diagnostics while hiding IDs, URLs, and empty messages."""
+    message = str(exc).strip()
+    message = UUID_RE.sub("[id 숨김]", message)
+    message = re.sub(r"https?://\S+", "[url 숨김]", message)
+    message = re.sub(r"(?:(?:[A-Za-z]:)?/)[^\s]+", "[경로 숨김]", message)
+    return message or fallback
+
+
+def error_packet(exc: Exception, command: str = "install") -> Dict[str, Any]:
+    """Return a stable, secret-free error contract for installer hosts."""
+    if isinstance(exc, UncertainWriteError):
+        code, retryable = "UNCERTAIN_WRITE", False
+        next_action = "Notion에서 저장 결과를 확인한 뒤 `다시 확인`으로 재개하세요. 확인 전 재전송하지 않습니다."
+    elif isinstance(exc, ConflictError):
+        code, retryable = "CONFLICT", True
+        next_action = "최신 페이지를 다시 읽고 변경안을 갱신한 뒤 다시 반영하세요."
+    elif isinstance(exc, CoordinatorError):
+        code, retryable = "COORDINATOR_ERROR", True
+        next_action = "coordinator 연결 상태를 확인한 뒤 같은 작업을 다시 시도하세요."
+    elif isinstance(exc, PermissionError):
+        code, retryable = "LOCAL_PERMISSION", False
+        next_action = "로컬 매핑 파일·Notion 연결 권한을 확인한 뒤 다시 시도하세요."
+    elif isinstance(exc, urllib.error.HTTPError) and exc.code in {401, 403}:
+        code, retryable = "NOTION_AUTH", False
+        next_action = "Notion 로그인·연결 권한과 토큰 설정을 확인한 뒤 다시 시도하세요."
+    elif isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, KeyError, UnicodeError)):
+        code, retryable = "INPUT_INVALID", False
+        next_action = "입력 파일·필수 옵션·속성 형식을 확인한 뒤 다시 시도하세요."
+    elif isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout, http.client.HTTPException)):
+        code, retryable = "NOTION_UNAVAILABLE", True
+        next_action = "Notion 연결 상태와 요청 제한을 확인한 뒤 다시 시도하세요."
+    elif isinstance(exc, OSError):
+        code, retryable = "LOCAL_IO_ERROR", True
+        next_action = "매핑 파일 경로·권한을 확인한 뒤 다시 시도하세요."
+    elif isinstance(exc, InstallerError):
+        message = str(exc)
+        if re.search(r"(?:Notion API )?(?:401|403)|로그인|권한|NOTION_TOKEN", message, re.I):
+            code, retryable = "NOTION_AUTH", False
+            next_action = "Notion 로그인·연결 권한과 토큰 설정을 확인한 뒤 다시 시도하세요."
+        else:
+            retryable = any(token in message for token in ("429", "529", "재시도", "연결", "잠시"))
+            code = "NOTION_OPERATION_FAILED"
+            next_action = (
+                "Notion 연결 상태를 확인한 뒤 같은 작업을 다시 시도하세요."
+                if retryable else
+                "입력·권한·설치 기록을 확인한 뒤 필요한 단계부터 다시 시도하세요."
+            )
+    else:
+        code, retryable = "INSTALLER_ERROR", False
+        next_action = "현재 단계는 저장하지 않고 오류 내용을 확인한 뒤 다시 시도하세요."
+    message = (_safe_error_message(exc, "요청을 처리하지 못했습니다.")
+               if code != "INSTALLER_ERROR" else "설치 중 예상하지 못한 오류가 발생했습니다.")
+    return {
+        "ok": False,
+        "error_code": code,
+        "retryable": retryable,
+        "stage": command,
+        "message": message or "요청을 처리하지 못했습니다.",
+        "next_action": next_action,
+    }
+
+
+def emit_error(packet: Dict[str, Any]) -> None:
+    """Print a compact host-facing error without a traceback."""
+    print(f"오류 [{packet['error_code']}]: {packet['message']}", file=sys.stderr)
+    print(f"다음 할 일: {packet['next_action']}", file=sys.stderr)
+
+
 class InstallerError(RuntimeError):
     """A user-facing installation error."""
 
@@ -3144,8 +3213,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Souvenir 설치 완료: 페이지 {len(mapping['pages'])}개 · 데이터베이스 {len(mapping['databases'])}개")
         print(f"설치 기록: {args.mapping}")
         return 0
-    except InstallerError as exc:
-        print(f"오류: {exc}", file=sys.stderr)
+    except Exception as exc:
+        emit_error(error_packet(exc, args.command if "args" in locals() else "install"))
         return 2
 
 

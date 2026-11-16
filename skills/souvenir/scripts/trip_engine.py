@@ -15,6 +15,7 @@ import html
 import json
 import os
 import re
+import socket
 import sys
 import urllib.parse
 import urllib.error
@@ -729,6 +730,53 @@ def configure_output() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
             except (OSError, ValueError):
                 pass
+
+
+def _safe_error_message(exc: Exception, fallback: str) -> str:
+    """Keep diagnostics useful without exposing local IDs or URLs."""
+    message = str(exc).strip()
+    message = re.sub(r"[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}", "[id 숨김]", message, flags=re.I)
+    message = re.sub(r"https?://\S+", "[url 숨김]", message)
+    message = re.sub(r"(?:(?:[A-Za-z]:)?/)[^\s]+", "[경로 숨김]", message)
+    return message or fallback
+
+
+def error_packet(exc: Exception, command: str = "engine") -> Dict[str, Any]:
+    """Return a stable, secret-free error contract for local hosts.
+
+    The chat layer can turn this packet into a short Korean message while the
+    CLI keeps a predictable code and next action for retries.  Unexpected
+    exceptions are intentionally redacted instead of exposing a traceback or
+    local paths to the user.
+    """
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout)):
+        code, retryable = "EXTERNAL_UNAVAILABLE", True
+        next_action = "외부 조회 상태를 확인한 뒤 같은 요청을 다시 시도하세요."
+    elif isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, KeyError, IndexError)):
+        code, retryable = "INPUT_INVALID", False
+        next_action = "입력 형식과 누락된 값을 확인한 뒤 다시 입력하세요."
+    elif isinstance(exc, OSError):
+        code, retryable = "LOCAL_IO_ERROR", True
+        next_action = "파일 경로·권한을 확인한 뒤 다시 시도하세요."
+    else:
+        code, retryable = "ENGINE_ERROR", False
+        next_action = "현재 단계는 저장하지 않고 오류 내용을 확인한 뒤 다시 시도하세요."
+    message = (_safe_error_message(exc, "요청을 처리하지 못했습니다.")
+               if code != "ENGINE_ERROR" else "처리 중 예상하지 못한 오류가 발생했습니다.")
+    return {
+        "ok": False,
+        "error_code": code,
+        "retryable": retryable,
+        "stage": command,
+        "message": message or "요청을 처리하지 못했습니다.",
+        "next_action": next_action,
+    }
+
+
+def emit_error(packet: Dict[str, Any]) -> None:
+    """Print a compact host-facing error without a traceback."""
+    print(f"오류 [{packet['error_code']}]: {packet['message']}", file=sys.stderr)
+    print(f"다음 할 일: {packet['next_action']}", file=sys.stderr)
 
 
 def value(row: Dict[str, Any], key: str, default: Any = None) -> Any:
@@ -2383,8 +2431,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                       source.get("packing", []))
         print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
         return 0
-    except (OSError, ValueError, KeyError) as exc:
-        print(f"오류: {exc}", file=sys.stderr)
+    except Exception as exc:
+        emit_error(error_packet(exc, args.command if "args" in locals() else "engine"))
         return 2
 
 

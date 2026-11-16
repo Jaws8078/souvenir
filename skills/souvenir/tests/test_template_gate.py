@@ -1,8 +1,10 @@
 """Tests for the host-facing template duplication gate."""
 import importlib.util
+import io
 import json
 import sys
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +21,15 @@ SOURCE = gate.load_source()
 
 
 class TemplateGateTests(unittest.TestCase):
+    def test_invalid_event_returns_compact_error_without_traceback(self):
+        output = io.StringIO()
+        with redirect_stderr(output):
+            code = gate.main(["event"])
+        self.assertEqual(code, 2)
+        self.assertIn("오류 [TEMPLATE_INPUT_ERROR]", output.getvalue())
+        self.assertIn("다음 할 일:", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+
     def base(self):
         return {
             "workspace_id": "workspace-1",

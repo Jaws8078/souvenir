@@ -4,6 +4,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,17 @@ SPEC.loader.exec_module(engine)
 
 
 class TripEngineTests(unittest.TestCase):
+    def test_error_packet_classifies_input_and_external_failures(self):
+        invalid = engine.error_packet(ValueError("필수 값 누락"), "places")
+        self.assertEqual(invalid["error_code"], "INPUT_INVALID")
+        self.assertFalse(invalid["retryable"])
+        self.assertEqual(invalid["stage"], "places")
+
+        unavailable = engine.error_packet(urllib.error.URLError("offline"), "places")
+        self.assertEqual(unavailable["error_code"], "EXTERNAL_UNAVAILABLE")
+        self.assertTrue(unavailable["retryable"])
+        self.assertIn("다시", unavailable["next_action"])
+
     def test_input_contract_lists_every_person_field_separately(self):
         contract = engine.input_fields_for("여행 개요·취향")
         self.assertEqual(contract["databases"], ["traveler"])

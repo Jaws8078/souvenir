@@ -103,6 +103,7 @@ Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽
 - 준비할 일·준비물·준비 진행률: [준비 규칙](references/preparation.md).
 - 날씨·플랜 B/C·자료: [대안과 자료](references/alternatives.md). 플랜 B/C는 기존 일정의 속성으로 기록한다.
 - 일정 충돌·이동 여유·기한·필수 정보·최신성 점검: [검증 규칙](references/validation.md).
+- 오류·충돌·저장 불확실성의 중단·재개: [오류와 예외 처리](references/error-handling.md).
 - 화면 구성·인원 변경: [사용성과 인원 규칙](references/template-usability.md).
 - Python으로 일정 검사·예산 계산·입력 정리·파일 가져오기·여행 중 확인 화면을 만들 때: [Python 엔진](references/python-engine.md).
 - 고정 템플릿 게이트의 상태·검사·복제 절차: [고정 템플릿 게이트](references/template-gate.md).

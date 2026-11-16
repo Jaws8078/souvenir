@@ -123,6 +123,20 @@ class FakeNotion:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_error_packet_distinguishes_uncertain_write_and_conflict(self):
+        uncertain = ni.error_packet(ni.UncertainWriteError("저장 여부 확인 필요"), "part-save")
+        self.assertEqual(uncertain["error_code"], "UNCERTAIN_WRITE")
+        self.assertFalse(uncertain["retryable"])
+        self.assertIn("재전송하지 않습니다", uncertain["next_action"])
+
+        conflict = ni.error_packet(ni.ConflictError("최신 값이 먼저 변경됨"), "part-save")
+        self.assertEqual(conflict["error_code"], "CONFLICT")
+        self.assertTrue(conflict["retryable"])
+
+        auth = ni.error_packet(ni.InstallerError("Notion API 401: invalid token"), "connect")
+        self.assertEqual(auth["error_code"], "NOTION_AUTH")
+        self.assertFalse(auth["retryable"])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
