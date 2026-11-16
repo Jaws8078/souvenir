@@ -13,6 +13,7 @@ import csv
 import datetime as dt
 import html
 import json
+import os
 import re
 import sys
 import urllib.parse
@@ -32,6 +33,21 @@ INPUT_UNKNOWN = "미정"
 IMAGE_INPUT_ALIASES = ("사진", "이미지", "사진 URL", "image_url", "image", "thumbnail", "cover")
 DEFAULT_PLACE_PAGE_SIZE = 10
 MAX_PLACE_PAGE_SIZE = 10
+GOOGLE_PLACES_ENDPOINT = "https://places.googleapis.com/v1/places:searchText"
+GOOGLE_PLACES_FIELD_MASK = ",".join([
+    "places.id",
+    "places.displayName",
+    "places.formattedAddress",
+    "places.googleMapsUri",
+    "places.websiteUri",
+    "places.rating",
+    "places.userRatingCount",
+    "places.primaryTypeDisplayName",
+    "places.currentOpeningHours",
+    "places.priceLevel",
+    "places.photos",
+    "nextPageToken",
+])
 
 # 대화에서 받은 값과 Notion 속성 사이의 단일 계약이다.  호스트는 이
 # 목록을 먼저 사용자에게 보여주고, 답변은 아래 ``property`` 이름으로
@@ -884,6 +900,7 @@ def _normalize_place_candidate(item: Dict[str, Any], rank: int) -> Dict[str, Any
         "지도 URL": ("지도 URL", "googleMapsUri", "maps_url", "map_url", "url"),
         "공식 링크": ("공식 링크", "websiteUri", "website", "official_url"),
         "사진 URL": ("사진 URL", "photoUri", "photo_url", "image_url", "thumbnail"),
+        "사진 리소스": ("사진 리소스", "photo_resource"),
         "출처": ("출처", "source", "source_url"),
         "영업시간·휴무": ("영업시간·휴무", "openingHours", "opening_hours", "hours"),
         "예산 메모": ("예산 메모", "budget", "priceLevel", "price_level"),
@@ -896,6 +913,7 @@ def _normalize_place_candidate(item: Dict[str, Any], rank: int) -> Dict[str, Any
                 row[target] = value_
                 break
     for target, keys in {
+        "장소 ID": ("장소 ID", "place_id", "id"),
         "평점": ("평점", "rating", "googleRating"),
         "리뷰 수": ("리뷰 수", "userRatingCount", "reviewCount"),
         "영업 상태": ("영업 상태", "businessStatus", "business_status"),
@@ -974,6 +992,50 @@ def prepare_place_candidate_page(evidence: Sequence[Dict[str, Any]], destination
             "후보 번호를 골라 저장할까요? 아직 더 필요하면 ‘다음 10개’라고 말해주세요."
             if packet["후보"] else packet["더 필요 질문"]
         ),
+    })
+    return packet
+
+
+def prepare_google_place_candidate_page(query: str, api_key: str, destination: str = "",
+                                        *, page_token: str = "", page_index: int = 0,
+                                        page_size: int = DEFAULT_PLACE_PAGE_SIZE,
+                                        language_code: str = "ko", region_code: str = "",
+                                        open_now: Optional[bool] = None,
+                                        timeout: float = 12.0) -> Dict[str, Any]:
+    """Search Google Places (New) and return the same review packet as host search."""
+    if page_index < 0:
+        raise ValueError("Google Maps 후보 페이지 번호는 0 이상이어야 합니다.")
+    provider_page_size = min(page_size, DEFAULT_PLACE_PAGE_SIZE)
+    search = google_places_text_search(
+        query, api_key, page_token=page_token, page_size=provider_page_size,
+        language_code=language_code, region_code=region_code,
+        open_now=open_now, timeout=timeout,
+    )
+    candidates = list(search["candidates"])
+    # A Google page is already sliced by the provider; rank it globally without
+    # asking the generic paginator to slice the page a second time.
+    base_rank = page_index * provider_page_size
+    for index, candidate in enumerate(candidates):
+        candidate["추천 순위"] = base_rank + index + 1
+    packet = prepare_place_candidate_page(candidates, destination, page_size=provider_page_size)
+    for index, row in enumerate(packet["후보"]):
+        row["추천 순위"] = base_rank + index + 1
+    next_token = search.get("next_page_token") or ""
+    has_more = bool(next_token)
+    packet.update({
+        "검색어": search["query"],
+        "검색 제공자": search["source"],
+        "다음 후보 있음": has_more,
+        "다음 시작": (base_rank + len(candidates)) if has_more else None,
+        "더 필요 질문": (
+            "조건에 맞는 다른 후보를 10곳 더 찾아볼까요?"
+            if has_more else "조건에 맞는 후보를 모두 보여드렸어요."
+        ),
+        # This is host state, not a value to save in Notion or display as a URL.
+        "후속 검색 상태": {
+            "page_index": page_index + 1 if has_more else None,
+            "page_token": next_token or None,
+        },
     })
     return packet
 
@@ -1402,6 +1464,106 @@ def _resolve_short_map_url(url: str, timeout: float = 8.0) -> Optional[str]:
             if candidate:
                 return urllib.parse.urljoin(url, candidate)
     return None
+
+
+def google_places_text_search(query: str, api_key: str, *,
+                              page_token: str = "", page_size: int = DEFAULT_PLACE_PAGE_SIZE,
+                              language_code: str = "ko", region_code: str = "",
+                              open_now: Optional[bool] = None,
+                              timeout: float = 12.0) -> Dict[str, Any]:
+    """Call Google Places API (New) Text Search with a narrow field mask.
+
+    The API key is accepted only for the request and is never copied into the
+    returned candidates or a Notion field.  The caller/host owns continuation
+    state (`nextPageToken`) and should request the next batch only after the
+    user asks for it.
+    """
+    query_text = text(query)
+    secret = text(api_key)
+    if not query_text:
+        raise ValueError("Google Maps 검색어가 비어 있습니다.")
+    if not secret:
+        raise ValueError("Google Places API 키가 없습니다. GOOGLE_PLACES_API_KEY를 설정해주세요.")
+    if page_size <= 0:
+        raise ValueError("Google Maps 검색 페이지 크기는 1 이상이어야 합니다.")
+    body: Dict[str, Any] = {"textQuery": query_text, "pageSize": min(page_size, 20)}
+    if page_token:
+        body["pageToken"] = text(page_token)
+    if language_code:
+        body["languageCode"] = text(language_code)
+    if region_code:
+        body["regionCode"] = text(region_code).upper()
+    if open_now is not None:
+        body["openNow"] = bool(open_now)
+    request = urllib.request.Request(
+        GOOGLE_PLACES_ENDPOINT,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Goog-Api-Key": secret,
+            "X-Goog-FieldMask": GOOGLE_PLACES_FIELD_MASK,
+            "User-Agent": "Souvenir travel planner",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        # Do not echo the request URL or API key into the chat/log output.
+        detail = ""
+        try:
+            raw = error.read(4096).decode("utf-8", errors="replace")
+            detail = text(json.loads(raw).get("error", {}).get("message"))
+        except (OSError, ValueError, TypeError):
+            pass
+        suffix = f": {detail}" if detail else ""
+        raise ValueError(f"Google Maps 검색에 실패했습니다 (HTTP {error.code}){suffix}") from error
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+        raise ValueError("Google Maps 검색을 완료하지 못했습니다. 네트워크와 API 설정을 확인해주세요.") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Google Maps 검색 응답 형식이 올바르지 않습니다.")
+    candidates: List[Dict[str, Any]] = []
+    for place in payload.get("places", []):
+        if not isinstance(place, dict):
+            continue
+        display_name = place.get("displayName")
+        name = display_name.get("text") if isinstance(display_name, dict) else display_name
+        type_name = place.get("primaryTypeDisplayName")
+        if isinstance(type_name, dict):
+            type_name = type_name.get("text")
+        opening = place.get("currentOpeningHours")
+        opening_text: Any = opening
+        if isinstance(opening, dict):
+            opening_text = " · ".join(str(item) for item in opening.get("weekdayDescriptions", []) if item)
+            if opening.get("openNow") is not None:
+                opening_text = f"{'영업 중' if opening['openNow'] else '영업 종료'}" + (f" · {opening_text}" if opening_text else "")
+        photo_resource = ""
+        photos = place.get("photos")
+        if isinstance(photos, list) and photos and isinstance(photos[0], dict):
+            photo_resource = text(photos[0].get("name"))
+        candidate: Dict[str, Any] = {
+            "name": text(name),
+            "region": text(place.get("formattedAddress")),
+            "type": text(type_name),
+            "googleMapsUri": text(place.get("googleMapsUri")),
+            "websiteUri": text(place.get("websiteUri")),
+            "rating": place.get("rating"),
+            "userRatingCount": place.get("userRatingCount"),
+            "priceLevel": place.get("priceLevel"),
+            "openingHours": opening_text,
+            "place_id": text(place.get("id")),
+        }
+        if photo_resource:
+            candidate["photo_resource"] = photo_resource
+        candidates.append({key: value_ for key, value_ in candidate.items() if value_ not in (None, "")})
+    return {
+        "query": query_text,
+        "candidates": candidates,
+        "next_page_token": text(payload.get("nextPageToken")),
+        "source": "Google Places API (New)",
+    }
 
 
 def _normalize_link(url: str, *, resolve_short_links: bool = True,
@@ -1911,6 +2073,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="장소 후보 페이지 시작 위치(다음 10개는 10)")
     parser.add_argument("--candidate-page-size", type=int, default=DEFAULT_PLACE_PAGE_SIZE,
                         help="장소 후보 표시 수(최대 10)")
+    parser.add_argument("--google-query", help="Google Places (New)에서 직접 검색할 문장")
+    parser.add_argument("--google-api-key", help="Google Places API 키(환경변수 GOOGLE_PLACES_API_KEY 권장)")
+    parser.add_argument("--google-page-token", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--google-page-index", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--google-language-code", default="ko", help=argparse.SUPPRESS)
+    parser.add_argument("--google-region-code", default="", help=argparse.SUPPRESS)
     parser.add_argument("--defer-external", action="store_true",
                         help="외부 지도·검색을 분리하고 조회 작업만 반환")
     parser.add_argument("--approved-places", help="확인 후 저장을 허용할 장소명(쉼표 구분)")
@@ -1969,7 +2137,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 result = {key: input_fields_for(key) for key in INPUT_CONTRACTS}
         elif args.command == "places":
-            if args.text is not None:
+            if args.google_query:
+                # Direct Google search is an explicit opt-in; the host still
+                # controls when to request the next opaque page token.
+                content = ""
+            elif args.text is not None:
                 content = args.text
             elif args.input:
                 content = args.input.read_text(encoding="utf-8-sig")
@@ -1987,12 +2159,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                     raw_evidence = [raw_evidence]
                 if isinstance(raw_evidence, list):
                     evidence = [item for item in raw_evidence if isinstance(item, dict)]
-            packet = prepare_place_confirmation(
-                content, args.destination or "", evidence,
-                defer_external=args.defer_external,
-                candidate_offset=args.candidate_offset,
-                candidate_page_size=args.candidate_page_size,
-            )
+            if args.google_query:
+                packet = prepare_google_place_candidate_page(
+                    args.google_query,
+                    args.google_api_key or os.environ.get("GOOGLE_PLACES_API_KEY", ""),
+                    args.destination or "",
+                    page_token=args.google_page_token,
+                    page_index=args.google_page_index,
+                    page_size=args.candidate_page_size,
+                    language_code=args.google_language_code,
+                    region_code=args.google_region_code,
+                )
+            else:
+                packet = prepare_place_confirmation(
+                    content, args.destination or "", evidence,
+                    defer_external=args.defer_external,
+                    candidate_offset=args.candidate_offset,
+                    candidate_page_size=args.candidate_page_size,
+                )
             if args.approved_places:
                 packet["승인된 장소"] = confirm_place_rows(
                     packet,

@@ -364,6 +364,60 @@ class TripEngineTests(unittest.TestCase):
         )
         self.assertEqual([row["장소"] for row in packet["장소"]], ["A", "B", "C"])
 
+    def test_google_places_search_normalizes_results_without_exposing_key(self):
+        payload = {
+            "places": [{
+                "id": "places/abc",
+                "displayName": {"text": "오호리 공원"},
+                "formattedAddress": "후쿠오카시 주오구",
+                "googleMapsUri": "https://maps.google.com/?cid=abc",
+                "rating": 4.7,
+                "userRatingCount": 1234,
+                "primaryTypeDisplayName": {"text": "공원"},
+                "currentOpeningHours": {"openNow": True, "weekdayDescriptions": ["월요일: 24시간"]},
+                "photos": [{"name": "places/abc/photos/1"}],
+            }],
+            "nextPageToken": "opaque-next-token",
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch.object(engine.urllib.request, "urlopen", return_value=FakeResponse()) as opener:
+            result = engine.google_places_text_search("후쿠오카 공원", "secret-key")
+        request = opener.call_args.args[0]
+        self.assertEqual(request.get_header("X-goog-api-key"), "secret-key")
+        self.assertEqual(result["candidates"][0]["name"], "오호리 공원")
+        self.assertEqual(result["candidates"][0]["photo_resource"], "places/abc/photos/1")
+        self.assertEqual(result["next_page_token"], "opaque-next-token")
+        self.assertNotIn("secret-key", json.dumps(result, ensure_ascii=False))
+
+    def test_google_place_page_uses_provider_token_for_next_ten(self):
+        with patch.object(
+            engine, "google_places_text_search",
+            return_value={
+                "query": "후쿠오카 관광지",
+                "source": "Google Places API (New)",
+                "next_page_token": "next-token",
+                "candidates": [{"name": f"장소 {index}"} for index in range(1, 11)],
+            },
+        ) as search:
+            packet = engine.prepare_google_place_candidate_page(
+                "후쿠오카 관광지", "secret-key", "후쿠오카", page_index=1,
+                page_token="previous-token",
+            )
+        search.assert_called_once()
+        self.assertEqual([row["추천 순위"] for row in packet["후보"]], list(range(11, 21)))
+        self.assertTrue(packet["다음 후보 있음"])
+        self.assertEqual(packet["후속 검색 상태"]["page_token"], "next-token")
+
     def test_shopping_import_preserves_optional_fields(self):
         rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")
         self.assertEqual(rows[0]["품목"], "유자 킷캣")
