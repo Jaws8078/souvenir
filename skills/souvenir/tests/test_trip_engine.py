@@ -440,6 +440,18 @@ class TripEngineTests(unittest.TestCase):
         self.assertNotIn("Google Maps 제공", saved[0])
         self.assertNotIn("평점", saved[0])
 
+    def test_host_search_fallback_works_without_google_api_key(self):
+        packet = engine.prepare_place_confirmation(
+            "", "후쿠오카", [
+                {"name": "오호리 공원", "region": "후쿠오카"},
+                {"name": "모모치 해변", "region": "후쿠오카"},
+            ],
+        )
+        self.assertEqual([row["장소"] for row in packet["후보"]], ["오호리 공원", "모모치 해변"])
+        self.assertFalse(packet["저장 가능"])
+        with self.assertRaisesRegex(ValueError, "GOOGLE_PLACES_API_KEY"):
+            engine.google_places_text_search("후쿠오카 관광지", "")
+
     def test_shopping_import_preserves_optional_fields(self):
         rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")
         self.assertEqual(rows[0]["품목"], "유자 킷캣")
