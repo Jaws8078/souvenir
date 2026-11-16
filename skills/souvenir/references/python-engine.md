@@ -10,7 +10,7 @@
 - `import`: 표준 라이브러리만 사용해 UTF-8 CSV, JSON, iCalendar(`.ics`), 텍스트 장소 목록과 지도 링크를 읽는다. Google Maps 공유 단축 링크(`maps.app.goo.gl`, `goo.gl/maps`)는 리디렉션을 따라 최종 주소에서 장소명을 추출한다. 링크가 만료·차단돼 해석되지 않으면 호스트명을 장소명으로 저장하지 않고 `확인 필요` 상태를 반환한다. PDF·이미지 OCR은 별도 승인과 도구가 필요한 후속 범위다.
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약과 `progress` 집계를 읽기 전용 화면용 JSON으로 만든다. 진행도는 일정·예약·할 일·준비물(선택한 경우 쇼핑)의 **완료 건수 ÷ 유효 대상 건수**로 다시 계산하며 취소·환불·제외는 분모에서도 뺀다. `진행도 수동 완료`/`직접 완료`는 자동 상태보다 우선하고 `자동 제외`는 자동 완료를 보류 상태로 되돌린다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 - `shopping`: 품목명만 받은 요청을 조사 후보 확인 패킷으로 만들거나, 외부 검색 결과 JSON에서 선택한 후보를 `사용자 확인 완료` 상태의 저장 준비 행으로 정규화한다. 검색 자체는 호스트의 웹·이미지 도구가 수행하고, 엔진은 값을 추정하지 않는다.
-- `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다. `--defer-external`을 사용하면 단축 지도 링크 해석을 기다리지 않고 `외부 조회` 작업만 반환한다.
+- `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다. 검색 결과만 `--evidence-input`으로 넣으면 추천순 최대 10개씩 후보를 보여주고 `--candidate-offset 10`으로 다음 10개를 요청할 수 있다. 결과가 10개보다 적으면 있는 만큼만 반환한다. `--defer-external`을 사용하면 단축 지도 링크 해석을 기다리지 않고 `외부 조회` 작업만 반환한다.
 - `fields`: 각 파트가 사용자에게 먼저 제시해야 하는 전체 입력 필드와 대상 DB를 반환한다. `normalize_part_input`은 답변을 해당 DB의 속성명으로 분리하며, 사람별 `의견·요청` 합치기 입력은 거부한다.
 - 외부 검색은 엔진이 임의로 실행하지 않는다. `shopping --defer-external`은 품목·목적지 검색 작업을 반환하고, 호스트가 조사한 후보를 다시 넣은 뒤 승인 패킷을 만든다.
 - fallback 설치기는 승인된 정규화 행을 `part-save --part <파트> --confirm`으로 해당 DB에 저장한다. 일정은 기존 `일차` 행을 재사용하고, 항공·숙소·장소·예산·준비물도 각 DB의 제목·속성에 직접 매핑한다.
@@ -59,6 +59,15 @@ python3 skills/souvenir/scripts/run_souvenir.py places \
   --destination 후쿠오카 \
   --text $'오호리 공원 | 후쿠오카 | 관광\n도쿄 타워 | 도쿄 | 관광' \
   --evidence-input place-evidence.json --pretty
+
+# 호스트가 조사한 추천순 후보를 최대 10개씩 보여준다. 다음 묶음은
+# 사용자 요청 뒤에만 offset을 10 올려 다시 호출한다.
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 --evidence-input place-search-results.json \
+  --candidate-offset 0 --candidate-page-size 10 --pretty
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 --evidence-input place-search-results.json \
+  --candidate-offset 10 --candidate-page-size 10 --pretty
 ```
 
 단축 링크도 같은 방식으로 가져올 수 있다. 네트워크에서 최종 주소를 확인할 수 없을 때는 저장하지 않고 확인 요청용 결과를 만든다.

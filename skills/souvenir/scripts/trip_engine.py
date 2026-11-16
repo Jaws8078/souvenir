@@ -30,6 +30,8 @@ SHORT_MAP_HOSTS = {"maps.app.goo.gl", "goo.gl"}
 SHOPPING_REQUIRED_FIELDS = ("구매 장소", "수량", "예상 금액")
 INPUT_UNKNOWN = "미정"
 IMAGE_INPUT_ALIASES = ("사진", "이미지", "사진 URL", "image_url", "image", "thumbnail", "cover")
+DEFAULT_PLACE_PAGE_SIZE = 10
+MAX_PLACE_PAGE_SIZE = 10
 
 # 대화에서 받은 값과 Notion 속성 사이의 단일 계약이다.  호스트는 이
 # 목록을 먼저 사용자에게 보여주고, 답변은 아래 ``property`` 이름으로
@@ -864,9 +866,123 @@ def _place_match_status(destination: str, region: str,
     return "확인 필요"
 
 
+def _candidate_rank(item: Dict[str, Any], fallback: int) -> Tuple[float, int]:
+    """Return a stable recommendation sort key for a provider result."""
+    raw = item.get("추천 순위", item.get("rank", item.get("position", item.get("순위"))))
+    parsed = number(raw)
+    return (parsed if parsed is not None else float(fallback), fallback)
+
+
+def _normalize_place_candidate(item: Dict[str, Any], rank: int) -> Dict[str, Any]:
+    """Normalize a web/Maps result for review without pretending it is saved."""
+    row: Dict[str, Any] = {}
+    name = text(item.get("장소") or item.get("name") or item.get("place") or item.get("displayName"))
+    row["장소"] = name or "확인 필요"
+    aliases = {
+        "지역": ("지역", "region", "formattedAddress", "address"),
+        "종류": ("종류", "type", "category", "primaryType"),
+        "지도 URL": ("지도 URL", "googleMapsUri", "maps_url", "map_url", "url"),
+        "공식 링크": ("공식 링크", "websiteUri", "website", "official_url"),
+        "사진 URL": ("사진 URL", "photoUri", "photo_url", "image_url", "thumbnail"),
+        "출처": ("출처", "source", "source_url"),
+        "영업시간·휴무": ("영업시간·휴무", "openingHours", "opening_hours", "hours"),
+        "예산 메모": ("예산 메모", "budget", "priceLevel", "price_level"),
+        "메모": ("메모", "note", "notes"),
+    }
+    for target, keys in aliases.items():
+        for key in keys:
+            value_ = item.get(key)
+            if value_ not in (None, "", []):
+                row[target] = value_
+                break
+    for target, keys in {
+        "평점": ("평점", "rating", "googleRating"),
+        "리뷰 수": ("리뷰 수", "userRatingCount", "reviewCount"),
+        "영업 상태": ("영업 상태", "businessStatus", "business_status"),
+    }.items():
+        for key in keys:
+            if item.get(key) not in (None, "", []):
+                row[target] = item[key]
+                break
+    row["추천 순위"] = rank
+    row["상태"] = "후보 검토 중"
+    row["저장 가능"] = False
+    return row
+
+
+def paginate_place_candidates(candidates: Sequence[Dict[str, Any]], *,
+                              offset: int = 0,
+                              page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
+    """Show at most ten ranked place candidates and expose continuation state.
+
+    Results are kept in provider recommendation order unless a result contains
+    an explicit rank.  Pagination is deliberately a review-only operation:
+    callers must still ask for approval before saving anything to Notion.
+    """
+    if offset < 0:
+        raise ValueError("장소 후보 시작 위치는 0 이상이어야 합니다.")
+    if page_size <= 0:
+        raise ValueError("장소 후보 페이지 크기는 1 이상이어야 합니다.")
+    page_size = min(page_size, MAX_PLACE_PAGE_SIZE)
+    ranked: List[Tuple[Tuple[float, int], Dict[str, Any]]] = []
+    for index, item in enumerate(candidates):
+        if isinstance(item, dict):
+            ranked.append((_candidate_rank(item, index + 1), item))
+    ranked.sort(key=lambda pair: pair[0])
+    ordered = [item for _, item in ranked]
+    page_items = ordered[offset:offset + page_size]
+    rows = [_normalize_place_candidate(item, offset + index + 1) for index, item in enumerate(page_items)]
+    total = len(ordered)
+    shown = len(rows)
+    has_more = offset + shown < total
+    next_offset = offset + shown if has_more else None
+    if not total:
+        question = "조건에 맞는 후보를 찾지 못했어요. 검색 조건을 바꿔볼까요?"
+    elif has_more:
+        question = "조건에 맞는 다른 후보를 10곳 더 찾아볼까요?"
+    else:
+        question = "조건에 맞는 후보를 모두 보여드렸어요."
+    return {
+        "후보": rows,
+        "장소": rows,
+        "추천 순서": "검색 결과의 추천순",
+        "현재 페이지": (offset // page_size) + 1,
+        "페이지 크기": shown,
+        "전체 후보 수": total,
+        "현재 시작": offset + 1 if shown else None,
+        "현재 종료": offset + shown if shown else None,
+        "다음 후보 있음": has_more,
+        "다음 시작": next_offset,
+        "더 필요 질문": question,
+    }
+
+
+def prepare_place_candidate_page(evidence: Sequence[Dict[str, Any]], destination: str = "",
+                                 *, offset: int = 0,
+                                 page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
+    """Build a review page from host-provided Maps/search results.
+
+    The host may pass Google Places results or another ranked provider.  This
+    function only normalizes and paginates the evidence; it never writes a DB.
+    """
+    packet = paginate_place_candidates(evidence, offset=offset, page_size=page_size)
+    packet.update({
+        "목적지": text(destination),
+        "상태": "후보 검토 중" if packet["후보"] else "검색 결과 없음",
+        "저장 가능": False,
+        "확인 질문": (
+            "후보 번호를 골라 저장할까요? 아직 더 필요하면 ‘다음 10개’라고 말해주세요."
+            if packet["후보"] else packet["더 필요 질문"]
+        ),
+    })
+    return packet
+
+
 def prepare_place_confirmation(content: str, destination: str = "",
                               evidence: Sequence[Dict[str, Any]] = (),
-                              defer_external: bool = False) -> Dict[str, Any]:
+                              defer_external: bool = False,
+                              candidate_offset: int = 0,
+                              candidate_page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
     """Prepare a place list for destination review before a Notion write.
 
     ``evidence`` is supplied by the host's web/Maps lookup and may contain a
@@ -874,6 +990,10 @@ def prepare_place_confirmation(content: str, destination: str = "",
     source URL.  Without evidence the result remains ``확인 필요``; this keeps
     an odd or unrelated link out of the saved place library.
     """
+    if not text(content) and evidence:
+        return prepare_place_candidate_page(
+            evidence, destination, offset=candidate_offset, page_size=candidate_page_size
+        )
     rows = parse_place_lines(content, defer_external=defer_external)
     destination_text = text(destination)
     evidence_by_name: Dict[str, Dict[str, Any]] = {}
@@ -1787,6 +1907,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-input", type=Path, help="shopping 외부 검색 후보 JSON")
     parser.add_argument("--candidate-index", type=int, help="확인할 후보 번호(0부터 시작)")
     parser.add_argument("--evidence-input", type=Path, help="places 외부 지도/검색 확인 JSON")
+    parser.add_argument("--candidate-offset", type=int, default=0,
+                        help="장소 후보 페이지 시작 위치(다음 10개는 10)")
+    parser.add_argument("--candidate-page-size", type=int, default=DEFAULT_PLACE_PAGE_SIZE,
+                        help="장소 후보 표시 수(최대 10)")
     parser.add_argument("--defer-external", action="store_true",
                         help="외부 지도·검색을 분리하고 조회 작업만 반환")
     parser.add_argument("--approved-places", help="확인 후 저장을 허용할 장소명(쉼표 구분)")
@@ -1849,8 +1973,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 content = args.text
             elif args.input:
                 content = args.input.read_text(encoding="utf-8-sig")
+            elif args.evidence_input:
+                # Host-provided ranked search results can be paginated without
+                # inventing a text list first.
+                content = ""
             else:
-                raise ValueError("places에는 --text 또는 --input이 필요합니다.")
+                raise ValueError("places에는 --text, --input 또는 --evidence-input이 필요합니다.")
             evidence: List[Dict[str, Any]] = []
             if args.evidence_input:
                 loaded = json.loads(args.evidence_input.read_text(encoding="utf-8-sig"))
@@ -1862,6 +1990,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             packet = prepare_place_confirmation(
                 content, args.destination or "", evidence,
                 defer_external=args.defer_external,
+                candidate_offset=args.candidate_offset,
+                candidate_page_size=args.candidate_page_size,
             )
             if args.approved_places:
                 packet["승인된 장소"] = confirm_place_rows(

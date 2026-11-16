@@ -325,6 +325,45 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(packet["장소"][0]["여행지 확인"], "확인 필요")
         self.assertEqual(engine.confirm_place_rows(packet, ["오호리 공원"])[0]["여행지 확인"], "사용자 확인 완료")
 
+    def test_place_candidates_are_paginated_in_ranked_batches_of_ten(self):
+        candidates = [
+            {"name": f"장소 {index}", "region": "후쿠오카", "추천 순위": index}
+            for index in range(1, 13)
+        ]
+        first = engine.prepare_place_candidate_page(candidates, "후쿠오카")
+        self.assertEqual(len(first["후보"]), 10)
+        self.assertEqual([row["추천 순위"] for row in first["후보"]], list(range(1, 11)))
+        self.assertTrue(first["다음 후보 있음"])
+        self.assertEqual(first["다음 시작"], 10)
+        self.assertIn("10곳 더", first["더 필요 질문"])
+        self.assertFalse(first["저장 가능"])
+
+        reordered = list(reversed(candidates))
+        ranked = engine.prepare_place_candidate_page(reordered, "후쿠오카")
+        self.assertEqual([row["장소"] for row in ranked["후보"][:2]], ["장소 1", "장소 2"])
+
+        second = engine.prepare_place_candidate_page(candidates, "후쿠오카", offset=10)
+        self.assertEqual(len(second["후보"]), 2)
+        self.assertEqual([row["추천 순위"] for row in second["후보"]], [11, 12])
+        self.assertFalse(second["다음 후보 있음"])
+        self.assertIsNone(second["다음 시작"])
+        self.assertIn("모두", second["더 필요 질문"])
+
+    def test_place_candidates_show_fewer_than_ten_without_fake_rows(self):
+        candidates = [{"name": "오호리 공원", "region": "후쿠오카"}, {"name": "모모치", "region": "후쿠오카"}]
+        packet = engine.prepare_place_candidate_page(candidates, "후쿠오카")
+        self.assertEqual(packet["전체 후보 수"], 2)
+        self.assertEqual(len(packet["장소"]), 2)
+        self.assertFalse(packet["다음 후보 있음"])
+        self.assertEqual(packet["더 필요 질문"], "조건에 맞는 후보를 모두 보여드렸어요.")
+
+    def test_explicit_place_text_is_not_truncated_by_candidate_paging(self):
+        packet = engine.prepare_place_confirmation(
+            "A | 후쿠오카\nB | 후쿠오카\nC | 후쿠오카", "후쿠오카",
+            candidate_offset=10,
+        )
+        self.assertEqual([row["장소"] for row in packet["장소"]], ["A", "B", "C"])
+
     def test_shopping_import_preserves_optional_fields(self):
         rows = engine.parse_shopping_lines("유자 킷캣 | 유성 | 하카타역 | 디저트 | 1200 | 카드 | 선물용")
         self.assertEqual(rows[0]["품목"], "유자 킷캣")
