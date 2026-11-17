@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "souvenir",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Notion에 여행 계획을 만들고 수정하는 Souvenir 여행 도우미.",
   "author": {
     "name": "Jaws8078"
@@ -22,7 +22,7 @@
       "interface": {
         "displayName": "Souvenir",
         "shortDescription": "Notion 여행 플래너",
-        "longDescription": "Notion 연결을 사용해 제공된 Souvenir 템플릿에서 여행 개요, 일정, 예약, 숙소, 예산, 동행자, 준비물과 자료를 한곳에서 관리합니다. 고정 템플릿 복제본을 먼저 확인하고, 가능한 호스트에서는 브라우저 자동화로 복제를 시도한 뒤 구조를 검증합니다. 목적지와 기간만 입력해도 시작하며 사용자의 메모와 기존 예약을 보존하면서 부분 수정합니다.",
+        "longDescription": "Notion 연결을 사용해 제공된 Souvenir 템플릿에서 여행 개요, 일정, 예약, 숙소, 예산, 동행자, 준비물과 자료를 한곳에서 관리합니다. 고정 템플릿 복제본을 먼저 확인하고, 가능한 호스트에서는 브라우저 자동화로 복제를 시도한 뒤 구조를 검증합니다. 목적지와 기간만 입력해도 시작하며 사용자의 메모와 기존 예약을 보존하면서 부분 수정합니다. 장소 검색은 API 키가 없어도 호스트 웹 검색으로 이어지고, API·호스트 결과를 같은 후보·정렬·필터·페이지 구조로 검토합니다.",
         "developerName": "Jaws8078",
         "category": "Productivity",
         "websiteURL": "https://github.com/Jaws8078/souvenir",
@@ -32,7 +32,7 @@
           "Update itineraries with confirmation",
           "Manage reservations, stays, budgets, and packing tasks",
           "Run local travel checks and calculations",
-          "Search and review Google Places candidates when a user-provided key is configured"
+          "Search and review normalized place candidates with or without a provider key"
         ],
         "defaultPrompt": [
           "Souvenir 설치 시작 — Notion 연결 확인",
