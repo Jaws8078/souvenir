@@ -11,6 +11,7 @@
 - `refresh`: 현재 날짜 기준 오늘 일정·다음 일정·예약 기한·확정 숙소·지갑 요약과 `progress` 집계를 읽기 전용 화면용 JSON으로 만든다. 진행도는 일정·예약·할 일·준비물(선택한 경우 쇼핑)의 **완료 건수 ÷ 유효 대상 건수**로 다시 계산하며 취소·환불·제외는 분모에서도 뺀다. `진행도 수동 완료`/`직접 완료`는 자동 상태보다 우선하고 `자동 제외`는 자동 완료를 보류 상태로 되돌린다. 기본 계산은 Notion 페이지를 수정하지 않는다.
 - `shopping`: 품목명만 받은 요청을 조사 후보 확인 패킷으로 만들거나, 외부 검색 결과 JSON에서 선택한 후보를 `사용자 확인 완료` 상태의 저장 준비 행으로 정규화한다. 검색 자체는 호스트의 웹·이미지 도구가 수행하고, 엔진은 값을 추정하지 않는다.
 - `places`: 여러 장소 입력을 목적지 적합성 확인 패킷으로 만든다. 지도·검색 근거가 없거나 목적지와 불일치하면 저장 가능 상태를 끄고, 사용자 승인 이후에만 저장할 수 있는 행으로 분리한다. 검색 결과만 `--evidence-input`으로 넣으면 추천순 최대 10개씩 후보를 보여주고 `--candidate-offset 10`으로 다음 10개를 요청할 수 있다. 결과가 10개보다 적으면 있는 만큼만 반환한다. `GOOGLE_PLACES_API_KEY`가 있는 로컬 실행기에서는 Places API (New) Text Search를 명시적으로 호출해 같은 후보 패킷을 만들 수 있고, 다음 묶음은 이전 검색 세션 JSON과 페이지 토큰을 함께 검증한 뒤 이어간다. 키는 결과·Notion에 저장하지 않으며 CLI 인자로 받지 않는다. `--google-rank DISTANCE`, `--google-included-type`, 위치 반경·영업 중 필터와 `--google-summary-only`로 검색 조건과 비용을 조절할 수 있다. Google API 오류는 인증·쿼터·네트워크·응답 형식별 코드로 반환한다. `--defer-external`을 사용하면 단축 지도 링크 해석을 기다리지 않고 `외부 조회` 작업만 반환한다.
+- `places --google-query`는 키가 없으면 자동으로 Google Maps 검색 링크 패킷으로 전환한다. 이 패킷은 API 후보를 가장하지 않고 `검색 URL`과 `검색 링크 확인 대기` 상태만 반환한다. 사용자가 링크에서 고른 장소의 Google Maps URL을 다시 보내면 기존 `parse_place_lines`·목적지 확인·사용자 승인 흐름으로 이어진다. 링크 기반 검색은 Google API 결과를 자동 수집하거나 평점·리뷰를 복사하지 않는다.
 - `fields`: 각 파트의 전체 저장 계약과 함께 기본 질문용 `question_fields`, 상세용 `optional_fields`, 대상 DB를 반환한다. 호스트는 기본 질문에서 `question_fields`만 사용하고, `normalize_part_input`은 답변을 해당 DB의 속성명으로 분리하며, 사람별 `의견·요청` 합치기 입력은 거부한다.
 - 외부 검색은 엔진이 임의로 실행하지 않는다. `shopping --defer-external`은 품목·목적지 검색 작업을 반환하고, 호스트가 조사한 후보를 다시 넣은 뒤 승인 패킷을 만든다.
 - fallback 설치기는 승인된 정규화 행을 `part-save --part <파트> --confirm`으로 해당 DB에 저장한다. 일정은 기존 `일차` 행을 재사용하고, 항공·숙소·장소·예산·준비물도 각 DB의 제목·속성에 직접 매핑한다.
@@ -75,6 +76,16 @@ GOOGLE_PLACES_API_KEY="secret_..." \
 python3 skills/souvenir/scripts/run_souvenir.py places \
   --destination 후쿠오카 --google-query '후쿠오카 관광지' \
   --google-rank RELEVANCE --google-summary-only --pretty
+
+# 키가 없는 환경에서는 같은 호출이 API 대신 검색 링크를 반환한다.
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 --google-query '카페' --pretty
+
+# 검색 링크에서 사용자가 고른 장소 링크를 다시 보내면 장소 확인 패킷으로 처리한다.
+python3 skills/souvenir/scripts/run_souvenir.py places \
+  --destination 후쿠오카 \
+  --text 'https://www.google.com/maps/place/Ohori+Park/@33.589,130.376' \
+  --pretty
 
 # 다음 묶음은 같은 query·필터·page token을 가진 검색 세션 상태를 그대로 넘긴다.
 python3 skills/souvenir/scripts/run_souvenir.py places \

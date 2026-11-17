@@ -1,6 +1,8 @@
 """Offline tests for Souvenir's Python travel engine."""
 import csv
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import time
@@ -308,6 +310,44 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(rows[0]["장소"], "오호리 공원")
         self.assertEqual(engine.normalize_link(rows[0]["지도 URL"])["label"], "Ohori")
         self.assertEqual(engine.parse_place_lines("https://maps.google.com/?query=Ohori")[0]["장소"], "Ohori")
+
+    def test_google_maps_link_search_packet_builds_a_no_key_search_flow(self):
+        packet = engine.prepare_google_maps_link_search("카페", "후쿠오카")
+        self.assertEqual(packet["검색 제공자"], "Google Maps URL")
+        self.assertEqual(packet["상태"], "검색 링크 확인 대기")
+        self.assertFalse(packet["후보 자동 수집"])
+        self.assertFalse(packet["저장 가능"])
+        self.assertIn("api=1", packet["검색 URL"])
+        self.assertIn("query=%ED%9B%84%EC%BF%A0%EC%98%A4%EC%B9%B4+%EC%B9%B4%ED%8E%98", packet["검색 URL"])
+        self.assertIn("링크를 보내주세요", packet["확인 질문"])
+
+    def test_google_maps_link_search_requires_a_query_or_destination(self):
+        with self.assertRaisesRegex(ValueError, "검색어 또는 여행지"):
+            engine.prepare_google_maps_link_search("")
+
+    def test_google_maps_search_url_is_not_treated_as_a_place(self):
+        search_url = engine.build_google_maps_search_url("카페", "후쿠오카")
+        row = engine.parse_place_lines(search_url)[0]
+        self.assertEqual(row["정보 상태"], "검색 링크")
+        self.assertEqual(row["장소"], "확인 필요")
+        self.assertFalse(row["저장 가능"])
+        packet = engine.prepare_place_confirmation(search_url, "후쿠오카")
+        self.assertFalse(packet["저장 가능"])
+        self.assertEqual(engine.confirm_place_rows(packet, ["1"]), [])
+
+    def test_google_query_uses_maps_link_when_api_key_is_missing(self):
+        output = io.StringIO()
+        with patch.dict(engine.os.environ, {}, clear=True):
+            with contextlib.redirect_stdout(output):
+                result = engine.main([
+                    "places",
+                    "--destination", "후쿠오카",
+                    "--google-query", "카페",
+                ])
+        self.assertEqual(result, 0)
+        packet = json.loads(output.getvalue())
+        self.assertEqual(packet["검색 제공자"], "Google Maps URL")
+        self.assertIn("검색 URL", packet)
 
     def test_place_input_contract_exposes_two_stage_notion_structure(self):
         contract = engine.input_fields_for("장소 보관함")

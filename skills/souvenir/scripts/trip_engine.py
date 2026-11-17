@@ -30,6 +30,8 @@ TIME_RANGE_RE = re.compile(r"(?P<start>\d{1,2}:\d{2})\s*[-~–]\s*(?P<end>\d{1,2
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 URL_RE = re.compile(r"https?://[^\s|]+", re.I)
 SHORT_MAP_HOSTS = {"maps.app.goo.gl", "goo.gl"}
+GOOGLE_MAPS_SEARCH_URL = "https://www.google.com/maps/search/"
+GOOGLE_MAPS_URL_MAX_LENGTH = 2048
 SHOPPING_REQUIRED_FIELDS = ("구매 장소", "수량", "예상 금액")
 INPUT_UNKNOWN = "미정"
 IMAGE_INPUT_ALIASES = ("사진", "이미지", "사진 URL", "image_url", "image", "thumbnail", "cover")
@@ -995,7 +997,12 @@ def parse_place_lines(content: str, *, resolve_short_links: bool = True,
             record["종류"] = fields[2]
         if urls:
             record["지도 URL"] = link_info["url"]
-            if link_info.get("resolution_status") in {"needs_confirmation", "not_needed"} and (
+            if link_info.get("search_url"):
+                record["장소"] = explicit_name or "확인 필요"
+                record["정보 상태"] = "검색 링크"
+                record["저장 가능"] = False
+                record["추가 확인"] = ["검색 결과에서 특정 장소 링크를 보내주세요"]
+            elif link_info.get("resolution_status") in {"needs_confirmation", "not_needed"} and (
                 defer_external and link_info.get("host") in SHORT_MAP_HOSTS
             ):
                 record["정보 상태"] = "외부 확인 대기"
@@ -1292,6 +1299,11 @@ def prepare_place_confirmation(content: str, destination: str = "",
     confirmed_rows: List[Dict[str, Any]] = []
     needs_review: List[Dict[str, Any]] = []
     for row in rows:
+        if row.get("정보 상태") == "검색 링크":
+            row["여행지 확인"] = "확인 필요"
+            row["저장 가능"] = False
+            needs_review.append(row)
+            continue
         evidence_item = evidence_by_name.get(_location_token(row.get("장소")))
         status = _place_match_status(destination_text, text(row.get("지역")), evidence_item)
         if evidence_item:
@@ -1375,6 +1387,10 @@ def confirm_place_rows(packet: Dict[str, Any], approved_places: Sequence[str] = 
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
+        if row.get("정보 상태") == "검색 링크":
+            # A generated search URL is only a navigation aid.  It cannot be
+            # approved as a place until the user sends a specific place URL.
+            continue
         if row.get("여행지 확인") == "불일치":
             continue
         matched_tokens = candidate_tokens(row)
@@ -1710,6 +1726,63 @@ def _map_label_from_url(url: str) -> str:
     return ""
 
 
+def _is_google_maps_search_url(url: str) -> bool:
+    """Return whether a URL opens a search result rather than one place."""
+    parsed = urllib.parse.urlparse(text(url))
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host not in {"www.google.com", "google.com", "maps.google.com"}:
+        return False
+    path = parsed.path.rstrip("/").lower()
+    if "/maps/search" in path:
+        return True
+    query = urllib.parse.parse_qs(parsed.query)
+    return query.get("api") == ["1"] and bool(query.get("query")) and "/maps" in path
+
+
+def build_google_maps_search_url(query: str, destination: str = "") -> str:
+    """Build a no-key Google Maps search URL for the host fallback flow.
+
+    Maps URLs launch a search in the user's Google Maps app or browser; they
+    are deliberately not treated as structured search results.  The user must
+    choose a place and send its place/share URL back before Souvenir can run
+    the normal destination check and approval flow.
+    """
+    query_text = text(query)
+    destination_text = text(destination)
+    if not query_text and not destination_text:
+        raise ValueError("Google Maps 검색어 또는 여행지가 필요합니다.")
+    search_text = " ".join(part for part in (destination_text, query_text) if part).strip()
+    url = f"{GOOGLE_MAPS_SEARCH_URL}?{urllib.parse.urlencode({'api': '1', 'query': search_text})}"
+    if len(url) > GOOGLE_MAPS_URL_MAX_LENGTH:
+        raise ValueError("Google Maps 검색어가 너무 깁니다. 더 짧게 입력해주세요.")
+    return url
+
+
+def prepare_google_maps_link_search(query: str, destination: str = "") -> Dict[str, Any]:
+    """Return a no-key search-link packet instead of pretending to have results."""
+    search_text = " ".join(part for part in (text(destination), text(query)) if part).strip()
+    search_url = build_google_maps_search_url(query, destination)
+    return {
+        "목적지": text(destination),
+        "검색어": search_text,
+        "검색 제공자": "Google Maps URL",
+        "검색 방식": "사용자 확인 링크",
+        "검색 URL": search_url,
+        "상태": "검색 링크 확인 대기",
+        "후보": [],
+        "장소": [],
+        "저장 가능": False,
+        "후보 자동 수집": False,
+        "Notion 저장": "선택한 장소 링크를 받은 뒤 사용자 승인 시 저장",
+        "확인 질문": (
+            "Google Maps에서 원하는 장소를 고른 뒤 장소 화면의 링크를 보내주세요. "
+            "여러 장소를 한 번에 보내도 됩니다."
+        ),
+        "다음 할 일": "Google Maps 검색 링크를 열고 원하는 장소 링크를 보내주세요.",
+        "Notion 구조": json.loads(json.dumps(PLACE_NOTION_STRUCTURE, ensure_ascii=False)),
+    }
+
+
 def _resolve_short_map_url(url: str, timeout: float = 8.0) -> Optional[str]:
     """Follow a Google Maps share link and return its final URL."""
     request = urllib.request.Request(
@@ -1907,6 +1980,11 @@ def _normalize_link(url: str, *, resolve_short_links: bool = True,
             resolution_status = "needs_confirmation"
             resolution_error = str(error)
     label = _map_label_from_url(resolved_url)
+    search_url = _is_google_maps_search_url(resolved_url)
+    if search_url:
+        # A search URL is a navigation aid, not a place record.  Do not turn
+        # its query text into a fake place name.
+        label = ""
     if host in SHORT_MAP_HOSTS and not label:
         resolution_status = "needs_confirmation"
         if not resolution_error:
@@ -1916,6 +1994,7 @@ def _normalize_link(url: str, *, resolve_short_links: bool = True,
         "host": host,
         "label": label,
         "resolution_status": resolution_status,
+        "search_url": search_url,
     }
     if resolved_url != raw:
         result["resolved_url"] = resolved_url
@@ -2391,7 +2470,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="장소 후보 페이지 시작 위치(다음 10개는 10)")
     parser.add_argument("--candidate-page-size", type=int, default=DEFAULT_PLACE_PAGE_SIZE,
                         help="장소 후보 표시 수(최대 10)")
-    parser.add_argument("--google-query", help="Google Places (New)에서 직접 검색할 문장")
+    parser.add_argument(
+        "--google-query",
+        help="Google Places (New) 검색 문장(키가 없으면 Google Maps 검색 링크로 전환)",
+    )
     parser.add_argument("--google-page-token", default="", help=argparse.SUPPRESS)
     parser.add_argument("--google-page-index", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--google-session-state", help=argparse.SUPPRESS)
@@ -2523,51 +2605,61 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if isinstance(raw_evidence, list):
                     evidence = [item for item in raw_evidence if isinstance(item, dict)]
             if args.google_query:
-                session_state = load_google_session_state(args.google_session_state)
-                page_token = args.google_page_token or text(session_state.get("page_token"))
-                page_index = args.google_page_index
-                if page_index is None:
-                    page_index = int(session_state.get("page_index") or 0)
-                location_bias = google_location_bias_from_args(args)
-                if session_state and page_token and not location_bias:
-                    location_bias = session_state.get("location_bias") or {}
-                page_size = args.candidate_page_size
-                if session_state and page_token:
-                    page_size = int(session_state.get("page_size") or page_size)
-                rank_preference = args.google_rank
-                if session_state and page_token and args.google_rank == "RELEVANCE":
-                    rank_preference = text(session_state.get("rank_preference")) or rank_preference
-                included_type = args.google_included_type
-                if session_state and page_token and not included_type:
-                    included_type = text(session_state.get("included_type"))
-                summary_only = args.google_summary_only
-                if session_state and page_token and not summary_only:
-                    summary_only = bool(session_state.get("summary_only"))
-                open_now = True if args.google_open_now else None
-                if session_state and page_token and "open_now" in session_state:
-                    open_now = session_state.get("open_now")
-                language_code = args.google_language_code
-                if session_state and page_token and session_state.get("language_code"):
-                    language_code = text(session_state["language_code"])
-                region_code = args.google_region_code
-                if session_state and page_token and session_state.get("region_code"):
-                    region_code = text(session_state["region_code"])
-                packet = prepare_google_place_candidate_page(
-                    args.google_query,
-                    os.environ.get("GOOGLE_PLACES_API_KEY", ""),
-                    args.destination or "",
-                    page_token=page_token,
-                    page_index=page_index,
-                    page_size=page_size,
-                    language_code=language_code,
-                    region_code=region_code,
-                    open_now=open_now,
-                    rank_preference=rank_preference,
-                    included_type=included_type,
-                    location_bias=location_bias,
-                    summary_only=summary_only,
-                    session_state=session_state or None,
-                )
+                api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+                if not api_key:
+                    # A no-key host must never pretend that a Maps URL is a
+                    # ranked API result.  It receives a link packet, opens the
+                    # search for the user, and feeds the selected place URL
+                    # back through ``parse_place_lines``/confirmation.
+                    packet = prepare_google_maps_link_search(
+                        args.google_query, args.destination or ""
+                    )
+                else:
+                    session_state = load_google_session_state(args.google_session_state)
+                    page_token = args.google_page_token or text(session_state.get("page_token"))
+                    page_index = args.google_page_index
+                    if page_index is None:
+                        page_index = int(session_state.get("page_index") or 0)
+                    location_bias = google_location_bias_from_args(args)
+                    if session_state and page_token and not location_bias:
+                        location_bias = session_state.get("location_bias") or {}
+                    page_size = args.candidate_page_size
+                    if session_state and page_token:
+                        page_size = int(session_state.get("page_size") or page_size)
+                    rank_preference = args.google_rank
+                    if session_state and page_token and args.google_rank == "RELEVANCE":
+                        rank_preference = text(session_state.get("rank_preference")) or rank_preference
+                    included_type = args.google_included_type
+                    if session_state and page_token and not included_type:
+                        included_type = text(session_state.get("included_type"))
+                    summary_only = args.google_summary_only
+                    if session_state and page_token and not summary_only:
+                        summary_only = bool(session_state.get("summary_only"))
+                    open_now = True if args.google_open_now else None
+                    if session_state and page_token and "open_now" in session_state:
+                        open_now = session_state.get("open_now")
+                    language_code = args.google_language_code
+                    if session_state and page_token and session_state.get("language_code"):
+                        language_code = text(session_state["language_code"])
+                    region_code = args.google_region_code
+                    if session_state and page_token and session_state.get("region_code"):
+                        region_code = text(session_state["region_code"])
+                    packet = prepare_google_place_candidate_page(
+                        args.google_query,
+                        api_key,
+                        args.destination or "",
+                        page_token=page_token,
+                        page_index=page_index,
+                        page_size=page_size,
+                        language_code=language_code,
+                        region_code=region_code,
+                        open_now=open_now,
+                        rank_preference=rank_preference,
+                        included_type=included_type,
+                        location_bias=location_bias,
+                        summary_only=summary_only,
+                        session_state=session_state or None,
+                    )
             else:
                 packet = prepare_place_confirmation(
                     content, args.destination or "", evidence,
