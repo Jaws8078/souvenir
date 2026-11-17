@@ -243,7 +243,7 @@ python3 skills/souvenir/scripts/notion_installer.py validate
 python3 skills/souvenir/scripts/notion_installer.py plan --pretty
 ```
 
-세부 규칙은 [Souvenir 스킬](skills/souvenir/SKILL.md), [대화형 계획 마법사](skills/souvenir/references/conversation-flow.md), [데이터 운영 규칙](skills/souvenir/references/data-operations.md), [구현 기록](docs/implementation-notes.md)에서 관리합니다. 변경 우선순위와 보호 범위는 [동시성 대응 메모](docs/concurrency-roadmap.md)에서 확인할 수 있습니다.
+세부 규칙은 [Souvenir 스킬](skills/souvenir/SKILL.md), [대화형 계획 마법사](skills/souvenir/references/conversation-flow.md), [데이터 운영 규칙](skills/souvenir/references/data-operations.md), [구현 기록](docs/implementation-notes.md)에서 관리합니다. 변경 우선순위와 보호 범위는 [동시성 대응 메모](docs/concurrency-roadmap.md), 다음 작업 목록은 [후속 개선 메모](docs/next-improvements.md)에서 확인할 수 있습니다.
 
 ## 라이선스
 
