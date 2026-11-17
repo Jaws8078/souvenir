@@ -1783,6 +1783,49 @@ def prepare_google_maps_link_search(query: str, destination: str = "") -> Dict[s
     }
 
 
+def prepare_host_place_search(query: str, destination: str = "", *,
+                              page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
+    """Create a host-web-search request for keyless place discovery.
+
+    The local engine cannot invoke a host's web-search connector itself.  It
+    returns an explicit external job that ChatGPT/Codex can fulfil with web
+    search and feed back as ``--evidence-input``.  A Maps URL remains a manual
+    fallback only when that connector is unavailable.
+    """
+    search_text = " ".join(part for part in (text(destination), text(query)) if part).strip()
+    if not search_text:
+        raise ValueError("Google Maps 검색어 또는 여행지가 필요합니다.")
+    page_size = max(1, min(int(page_size), MAX_PLACE_PAGE_SIZE))
+    return {
+        "목적지": text(destination),
+        "검색어": search_text,
+        "검색 제공자": "호스트 웹 검색",
+        "검색 방식": "AI 웹 검색",
+        "상태": "외부 검색 대기",
+        "후보": [],
+        "장소": [],
+        "저장 가능": False,
+        "후보 자동 수집": True,
+        "외부 조회": [{
+            "kind": "place_search",
+            "provider": "host_web_search",
+            "query": search_text,
+            "destination": text(destination),
+            "max_results": page_size,
+            "sort": "추천순",
+            "dedupe_by": ["지도 URL", "장소 ID", "장소"],
+            "required_evidence": ["장소", "지역", "종류", "지도 URL", "출처"],
+        }],
+        "검색 링크 대체": {
+            "검색 URL": build_google_maps_search_url(query, destination),
+            "사용 시점": "호스트 웹 검색을 사용할 수 없는 경우",
+        },
+        "확인 질문": "조건에 맞는 후보를 검색한 뒤 추천순으로 보여드릴게요.",
+        "다음 할 일": "검색 결과를 확인해주세요.",
+        "Notion 구조": json.loads(json.dumps(PLACE_NOTION_STRUCTURE, ensure_ascii=False)),
+    }
+
+
 def _resolve_short_map_url(url: str, timeout: float = 8.0) -> Optional[str]:
     """Follow a Google Maps share link and return its final URL."""
     request = urllib.request.Request(
@@ -2472,7 +2515,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="장소 후보 표시 수(최대 10)")
     parser.add_argument(
         "--google-query",
-        help="Google Places (New) 검색 문장(키가 없으면 Google Maps 검색 링크로 전환)",
+        help="Google Places (New) 검색 문장(키가 없으면 호스트 웹 검색으로 전환)",
     )
     parser.add_argument("--google-page-token", default="", help=argparse.SUPPRESS)
     parser.add_argument("--google-page-index", type=int, default=None, help=argparse.SUPPRESS)
@@ -2607,12 +2650,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.google_query:
                 api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
                 if not api_key:
-                    # A no-key host must never pretend that a Maps URL is a
-                    # ranked API result.  It receives a link packet, opens the
-                    # search for the user, and feeds the selected place URL
-                    # back through ``parse_place_lines``/confirmation.
-                    packet = prepare_google_maps_link_search(
-                        args.google_query, args.destination or ""
+                    # Keyless discovery is delegated to the host's web-search
+                    # connector.  The packet contains a Maps URL only as a
+                    # manual fallback when that connector is unavailable.
+                    packet = prepare_host_place_search(
+                        args.google_query,
+                        args.destination or "",
+                        page_size=args.candidate_page_size,
                     )
                 else:
                     session_state = load_google_session_state(args.google_session_state)

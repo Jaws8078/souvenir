@@ -325,6 +325,15 @@ class TripEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "검색어 또는 여행지"):
             engine.prepare_google_maps_link_search("")
 
+    def test_host_place_search_packet_is_the_default_without_api_key(self):
+        packet = engine.prepare_host_place_search("카페", "후쿠오카")
+        self.assertEqual(packet["검색 제공자"], "호스트 웹 검색")
+        self.assertEqual(packet["검색 방식"], "AI 웹 검색")
+        self.assertEqual(packet["상태"], "외부 검색 대기")
+        self.assertEqual(packet["외부 조회"][0]["provider"], "host_web_search")
+        self.assertEqual(packet["외부 조회"][0]["max_results"], 10)
+        self.assertIn("검색 URL", packet["검색 링크 대체"])
+
     def test_google_maps_search_url_is_not_treated_as_a_place(self):
         search_url = engine.build_google_maps_search_url("카페", "후쿠오카")
         row = engine.parse_place_lines(search_url)[0]
@@ -335,7 +344,7 @@ class TripEngineTests(unittest.TestCase):
         self.assertFalse(packet["저장 가능"])
         self.assertEqual(engine.confirm_place_rows(packet, ["1"]), [])
 
-    def test_google_query_uses_maps_link_when_api_key_is_missing(self):
+    def test_google_query_requests_host_search_when_api_key_is_missing(self):
         output = io.StringIO()
         with patch.dict(engine.os.environ, {}, clear=True):
             with contextlib.redirect_stdout(output):
@@ -346,8 +355,9 @@ class TripEngineTests(unittest.TestCase):
                 ])
         self.assertEqual(result, 0)
         packet = json.loads(output.getvalue())
-        self.assertEqual(packet["검색 제공자"], "Google Maps URL")
-        self.assertIn("검색 URL", packet)
+        self.assertEqual(packet["검색 제공자"], "호스트 웹 검색")
+        self.assertEqual(packet["상태"], "외부 검색 대기")
+        self.assertEqual(packet["외부 조회"][0]["provider"], "host_web_search")
 
     def test_place_input_contract_exposes_two_stage_notion_structure(self):
         contract = engine.input_fields_for("장소 보관함")
