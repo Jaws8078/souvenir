@@ -37,6 +37,15 @@ INPUT_UNKNOWN = "미정"
 IMAGE_INPUT_ALIASES = ("사진", "이미지", "사진 URL", "image_url", "image", "thumbnail", "cover")
 DEFAULT_PLACE_PAGE_SIZE = 10
 MAX_PLACE_PAGE_SIZE = 10
+PLACE_SEARCH_CONTRACT_VERSION = 1
+PLACE_CANDIDATE_FIELDS = [
+    "추천 순위", "장소", "지역", "종류", "지도 URL", "공식 링크", "사진 URL",
+    "출처", "평점", "리뷰 수", "영업 상태", "영업시간·휴무", "예산 메모", "메모",
+]
+PLACE_SEARCH_FILTER_KEYS = [
+    "destination", "kind", "included_type", "open_now", "budget", "distance",
+    "rank_preference", "location_bias", "summary_only",
+]
 GOOGLE_PLACES_ENDPOINT = "https://places.googleapis.com/v1/places:searchText"
 GOOGLE_PLACES_FIELD_MASK = ",".join([
     "places.id",
@@ -1055,6 +1064,114 @@ def _candidate_rank(item: Dict[str, Any], fallback: int) -> Tuple[float, int]:
     return (parsed if parsed is not None else float(fallback), fallback)
 
 
+def _candidate_value(item: Dict[str, Any], keys: Sequence[str]) -> str:
+    """Return the first non-empty candidate value for an alias list."""
+    for key in keys:
+        value_ = item.get(key)
+        if value_ not in (None, "", []):
+            return text(value_)
+    return ""
+
+
+def _candidate_identity(item: Dict[str, Any]) -> str:
+    """Build a stable identity used to remove duplicate provider results."""
+    place_id = _candidate_value(item, ("장소 ID", "place_id", "id"))
+    if place_id:
+        return f"id:{_location_token(place_id)}"
+    maps_url = _candidate_value(item, ("지도 URL", "googleMapsUri", "maps_url", "map_url"))
+    if maps_url:
+        return f"map:{_location_token(maps_url)}"
+    name = _candidate_value(item, ("장소", "name", "place", "displayName"))
+    region = _candidate_value(item, ("지역", "region", "formattedAddress", "address"))
+    if name or region:
+        return f"name:{_location_token(name)}|region:{_location_token(region)}"
+    return ""
+
+
+def _normalize_search_filters(filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize API/host filter aliases without inventing missing values."""
+    if not isinstance(filters, dict):
+        return {}
+    aliases = {
+        "destination": ("destination", "목적지"),
+        "kind": ("kind", "종류", "category", "카테고리"),
+        "included_type": ("included_type", "includedType", "장소 유형"),
+        "open_now": ("open_now", "openNow", "영업 중", "영업중"),
+        "budget": ("budget", "예산", "가격"),
+        "distance": ("distance", "거리", "반경"),
+        "rank_preference": ("rank_preference", "rankPreference", "정렬 기준"),
+        "location_bias": ("location_bias", "locationBias", "위치 편향"),
+        "summary_only": ("summary_only", "summaryOnly", "요약 검색"),
+    }
+    normalized: Dict[str, Any] = {}
+    for canonical, keys in aliases.items():
+        for key in keys:
+            value_ = filters.get(key)
+            if value_ not in (None, "", []):
+                normalized[canonical] = value_
+                break
+    # Preserve explicit provider-neutral filters such as ``분위기`` or
+    # ``가격대`` so the host can explain what was applied versus unavailable.
+    for key, value_ in filters.items():
+        if key not in {alias for values in aliases.values() for alias in values}:
+            if value_ not in (None, "", []):
+                normalized[text(key)] = value_
+    return normalized
+
+
+def _sort_label(sort: str) -> str:
+    raw = text(sort)
+    value_ = raw.upper()
+    if raw == "거리순" or value_ == "DISTANCE":
+        return "거리순"
+    if raw == "평점순" or value_ in {"RATING", "RATINGS"}:
+        return "평점순"
+    return "추천순"
+
+
+def _place_search_metadata(*, query: str = "", destination: str = "",
+                           provider: str = "", sort: str = "RELEVANCE",
+                           filters: Optional[Dict[str, Any]] = None,
+                           page_size: int = DEFAULT_PLACE_PAGE_SIZE,
+                           offset: int = 0, total: Optional[int] = None,
+                           shown: int = 0, has_more: bool = False,
+                           deduped: int = 0) -> Dict[str, Any]:
+    """Return the common result/filter contract shared by API and host search."""
+    normalized_filters = _normalize_search_filters(filters)
+    size = max(1, min(int(page_size), MAX_PLACE_PAGE_SIZE))
+    sort_label = _sort_label(sort)
+    total_value: Any = total if total is not None else "미확인"
+    return {
+        "검색 계약": {
+            "버전": PLACE_SEARCH_CONTRACT_VERSION,
+            "최대 후보 수": MAX_PLACE_PAGE_SIZE,
+            "기본 정렬": "추천순",
+            "후보 필드": list(PLACE_CANDIDATE_FIELDS),
+            "중복 제거 기준": ["장소 ID", "지도 URL", "장소+지역"],
+            "필터 키": list(PLACE_SEARCH_FILTER_KEYS),
+        },
+        "검색 설정": {
+            "query": text(query),
+            "destination": text(destination),
+            "sort": sort_label,
+            "page_size": size,
+            "offset": max(0, int(offset)),
+            "filters": normalized_filters,
+        },
+        "정렬": sort_label,
+        "필터": normalized_filters,
+        "후보 수": {
+            "전체": total_value,
+            "현재 페이지": shown,
+            "시작 순위": (offset + 1) if shown else None,
+            "종료 순위": (offset + shown) if shown else None,
+            "다음 묶음 있음": bool(has_more),
+        },
+        "중복 제거 수": max(0, int(deduped)),
+        "검색 제공자": text(provider) if provider else "확인 필요",
+    }
+
+
 def _normalize_place_candidate(item: Dict[str, Any], rank: int) -> Dict[str, Any]:
     """Normalize a web/Maps result for review without pretending it is saved."""
     row: Dict[str, Any] = {}
@@ -1113,10 +1230,24 @@ def paginate_place_candidates(candidates: Sequence[Dict[str, Any]], *,
         if isinstance(item, dict):
             ranked.append((_candidate_rank(item, index + 1), item))
     ranked.sort(key=lambda pair: pair[0])
-    ordered = [item for _, item in ranked]
-    page_items = ordered[offset:offset + page_size]
-    rows = [_normalize_place_candidate(item, offset + index + 1) for index, item in enumerate(page_items)]
-    total = len(ordered)
+    ordered_ranked: List[Tuple[Tuple[float, int], Dict[str, Any]]] = []
+    seen: set[str] = set()
+    for sort_key, item in ranked:
+        identity = _candidate_identity(item)
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        ordered_ranked.append((sort_key, item))
+    page_ranked = ordered_ranked[offset:offset + page_size]
+    normalized_rows: List[Dict[str, Any]] = []
+    for sort_key, item in page_ranked:
+        rank_value = sort_key[0]
+        if isinstance(rank_value, float) and rank_value.is_integer():
+            rank_value = int(rank_value)
+        normalized_rows.append(_normalize_place_candidate(item, rank_value))
+    rows = normalized_rows
+    total = len(ordered_ranked)
     shown = len(rows)
     has_more = offset + shown < total
     next_offset = offset + shown if has_more else None
@@ -1126,10 +1257,11 @@ def paginate_place_candidates(candidates: Sequence[Dict[str, Any]], *,
         question = "조건에 맞는 다른 후보를 10곳 더 찾아볼까요?"
     else:
         question = "조건에 맞는 후보를 모두 보여드렸어요."
-    return {
+    result = {
         "후보": rows,
         "장소": rows,
         "추천 순서": "검색 결과의 추천순",
+        "정렬": "추천순",
         "현재 페이지": (offset // page_size) + 1,
         "페이지 크기": shown,
         "전체 후보 수": total,
@@ -1139,17 +1271,49 @@ def paginate_place_candidates(candidates: Sequence[Dict[str, Any]], *,
         "다음 시작": next_offset,
         "더 필요 질문": question,
     }
+    result.update(_place_search_metadata(
+        sort="RELEVANCE", page_size=page_size, offset=offset,
+        total=total, shown=shown, has_more=has_more,
+        deduped=len(ranked) - len(ordered_ranked),
+    ))
+    return result
 
 
 def prepare_place_candidate_page(evidence: Sequence[Dict[str, Any]], destination: str = "",
                                  *, offset: int = 0,
-                                 page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
+                                 page_size: int = DEFAULT_PLACE_PAGE_SIZE,
+                                 query: str = "", provider: str = "호스트 웹 검색",
+                                 search_filters: Optional[Dict[str, Any]] = None,
+                                 sort: str = "RELEVANCE") -> Dict[str, Any]:
     """Build a review page from host-provided Maps/search results.
 
     The host may pass Google Places results or another ranked provider.  This
     function only normalizes and paginates the evidence; it never writes a DB.
     """
     packet = paginate_place_candidates(evidence, offset=offset, page_size=page_size)
+    evidence_rows = [item for item in evidence if isinstance(item, dict)]
+    evidence_by_name: Dict[str, Dict[str, Any]] = {}
+    for item in evidence_rows:
+        name = _candidate_value(item, ("장소", "name", "place", "displayName"))
+        if name:
+            evidence_by_name.setdefault(_location_token(name), item)
+    for row in packet["후보"]:
+        source_item = evidence_by_name.get(_location_token(row.get("장소")), {})
+        row["검색 제공자"] = text(source_item.get("검색 제공자") or source_item.get("provider") or provider)
+        row["여행지 확인"] = _place_match_status(
+            text(destination), text(row.get("지역")), source_item
+        )
+        row["저장 가능"] = False
+        if row["검색 제공자"] == "Google Places API (New)":
+            row["Google Maps 제공"] = True
+    packet.update(_place_search_metadata(
+        query=query, destination=destination, provider=provider,
+        sort=sort, filters=search_filters, page_size=page_size,
+        offset=offset, total=packet["전체 후보 수"],
+        shown=len(packet["후보"]), has_more=packet["다음 후보 있음"],
+        deduped=packet["중복 제거 수"],
+    ))
+    packet["추천 순서"] = f"검색 결과의 {packet['정렬']}"
     packet.update({
         "목적지": text(destination),
         "상태": "후보 검토 중" if packet["후보"] else "검색 결과 없음",
@@ -1219,7 +1383,17 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
     base_rank = page_index * provider_page_size
     for index, candidate in enumerate(candidates):
         candidate["추천 순위"] = base_rank + index + 1
-    packet = prepare_place_candidate_page(candidates, destination, page_size=provider_page_size)
+    packet = prepare_place_candidate_page(
+        candidates, destination, page_size=provider_page_size,
+        query=search["query"], provider=search["source"],
+        search_filters={
+            "rank_preference": text(rank_preference).upper(),
+            "included_type": text(included_type),
+            "location_bias": location_bias or {},
+            "open_now": open_now,
+            "summary_only": bool(summary_only),
+        }, sort=rank_preference,
+    )
     for index, row in enumerate(packet["후보"]):
         row["추천 순위"] = base_rank + index + 1
         row["검색 제공자"] = search["source"]
@@ -1238,9 +1412,11 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
         "검색 순위 안내": GOOGLE_SEARCH_RANKING_NOTICE,
         "정책 상태": "후보 화면에서만 표시 · 저장 전 사용자 입력 라벨 필요",
         "검색 설정": {
+            **packet.get("검색 설정", {}),
             "rank_preference": text(rank_preference).upper(),
             "included_type": text(included_type),
             "location_bias": location_bias or {},
+            "open_now": open_now,
             "summary_only": bool(summary_only),
         },
         "Notion 구조": json.loads(json.dumps(PLACE_NOTION_STRUCTURE, ensure_ascii=False)),
@@ -1267,6 +1443,17 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
             "issued_at": time.time() if has_more else None,
         },
     })
+    # The provider token tells us that the total result count is not known yet;
+    # keep the legacy page count fields while making the normalized count
+    # contract explicit and consistent with the host-search path.
+    packet["후보 수"].update({
+        "전체": "미확인" if has_more else len(packet["후보"]),
+        "현재 페이지": len(packet["후보"]),
+        "시작 순위": base_rank + 1 if candidates else None,
+        "종료 순위": base_rank + len(packet["후보"]) if candidates else None,
+        "다음 묶음 있음": has_more,
+    })
+    packet["검색 설정"]["offset"] = base_rank
     return packet
 
 
@@ -1274,7 +1461,11 @@ def prepare_place_confirmation(content: str, destination: str = "",
                               evidence: Sequence[Dict[str, Any]] = (),
                               defer_external: bool = False,
                               candidate_offset: int = 0,
-                              candidate_page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
+                              candidate_page_size: int = DEFAULT_PLACE_PAGE_SIZE,
+                              search_query: str = "",
+                              search_provider: str = "호스트 웹 검색",
+                              search_filters: Optional[Dict[str, Any]] = None,
+                              search_sort: str = "RELEVANCE") -> Dict[str, Any]:
     """Prepare a place list for destination review before a Notion write.
 
     ``evidence`` is supplied by the host's web/Maps lookup and may contain a
@@ -1284,7 +1475,9 @@ def prepare_place_confirmation(content: str, destination: str = "",
     """
     if not text(content) and evidence:
         return prepare_place_candidate_page(
-            evidence, destination, offset=candidate_offset, page_size=candidate_page_size
+            evidence, destination, offset=candidate_offset, page_size=candidate_page_size,
+            query=search_query, provider=search_provider,
+            search_filters=search_filters, sort=search_sort,
         )
     rows = parse_place_lines(content, defer_external=defer_external)
     destination_text = text(destination)
@@ -1784,7 +1977,9 @@ def prepare_google_maps_link_search(query: str, destination: str = "") -> Dict[s
 
 
 def prepare_host_place_search(query: str, destination: str = "", *,
-                              page_size: int = DEFAULT_PLACE_PAGE_SIZE) -> Dict[str, Any]:
+                              page_size: int = DEFAULT_PLACE_PAGE_SIZE,
+                              search_filters: Optional[Dict[str, Any]] = None,
+                              sort: str = "RELEVANCE") -> Dict[str, Any]:
     """Create a host-web-search request for keyless place discovery.
 
     The local engine cannot invoke a host's web-search connector itself.  It
@@ -1796,7 +1991,9 @@ def prepare_host_place_search(query: str, destination: str = "", *,
     if not search_text:
         raise ValueError("Google Maps 검색어 또는 여행지가 필요합니다.")
     page_size = max(1, min(int(page_size), MAX_PLACE_PAGE_SIZE))
-    return {
+    normalized_filters = _normalize_search_filters(search_filters)
+    sort_label = _sort_label(sort)
+    packet = {
         "목적지": text(destination),
         "검색어": search_text,
         "검색 제공자": "호스트 웹 검색",
@@ -1812,7 +2009,8 @@ def prepare_host_place_search(query: str, destination: str = "", *,
             "query": search_text,
             "destination": text(destination),
             "max_results": page_size,
-            "sort": "추천순",
+            "sort": sort_label,
+            "filters": normalized_filters,
             "dedupe_by": ["지도 URL", "장소 ID", "장소"],
             "required_evidence": ["장소", "지역", "종류", "지도 URL", "출처"],
         }],
@@ -1824,6 +2022,24 @@ def prepare_host_place_search(query: str, destination: str = "", *,
         "다음 할 일": "검색 결과를 확인해주세요.",
         "Notion 구조": json.loads(json.dumps(PLACE_NOTION_STRUCTURE, ensure_ascii=False)),
     }
+    packet.update(_place_search_metadata(
+        query=search_text, destination=destination, provider="호스트 웹 검색",
+        sort=sort, filters=normalized_filters,
+        page_size=page_size, offset=0,
+        total=None, shown=0, has_more=False,
+    ))
+    # Keep the initial packet explicit: no provider result has been fetched,
+    # so ``전체`` is unknown rather than a fabricated zero-result count.
+    packet["후보 수"]["상태"] = "검색 전"
+    packet["검색 설정"]["filters"] = normalized_filters
+    packet["외부 조회"][0]["result_contract"] = {
+        "version": PLACE_SEARCH_CONTRACT_VERSION,
+        "max_results": page_size,
+        "sort": sort_label,
+        "candidate_fields": list(PLACE_CANDIDATE_FIELDS),
+        "filters": list(PLACE_SEARCH_FILTER_KEYS),
+    }
+    return packet
 
 
 def _resolve_short_map_url(url: str, timeout: float = 8.0) -> Optional[str]:
@@ -2647,16 +2863,41 @@ def main(argv: Optional[List[str]] = None) -> int:
                     raw_evidence = [raw_evidence]
                 if isinstance(raw_evidence, list):
                     evidence = [item for item in raw_evidence if isinstance(item, dict)]
+            evidence_search_query = ""
+            evidence_search_provider = "호스트 웹 검색"
+            evidence_search_filters: Dict[str, Any] = {}
+            evidence_search_sort = "RELEVANCE"
+            if args.evidence_input and isinstance(loaded, dict):
+                evidence_search_query = text(
+                    loaded.get("검색어") or loaded.get("query") or ""
+                )
+                evidence_search_provider = text(
+                    loaded.get("검색 제공자") or loaded.get("provider") or evidence_search_provider
+                )
+                raw_filters = loaded.get("필터") or loaded.get("filters") or loaded.get("검색 설정")
+                if isinstance(raw_filters, dict):
+                    evidence_search_filters = raw_filters.get("filters", raw_filters)
+                evidence_search_sort = text(
+                    loaded.get("정렬") or loaded.get("sort") or evidence_search_filters.get("rank_preference") or "RELEVANCE"
+                )
             if args.google_query:
                 api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
                 if not api_key:
                     # Keyless discovery is delegated to the host's web-search
                     # connector.  The packet contains a Maps URL only as a
                     # manual fallback when that connector is unavailable.
+                    host_location_bias = google_location_bias_from_args(args)
                     packet = prepare_host_place_search(
                         args.google_query,
                         args.destination or "",
                         page_size=args.candidate_page_size,
+                        search_filters={
+                            "included_type": args.google_included_type,
+                            "open_now": True if args.google_open_now else None,
+                            "location_bias": host_location_bias,
+                            "summary_only": bool(args.google_summary_only),
+                        },
+                        sort=args.google_rank,
                     )
                 else:
                     session_state = load_google_session_state(args.google_session_state)
@@ -2710,6 +2951,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     defer_external=args.defer_external,
                     candidate_offset=args.candidate_offset,
                     candidate_page_size=args.candidate_page_size,
+                    search_query=evidence_search_query,
+                    search_provider=evidence_search_provider,
+                    search_filters=evidence_search_filters,
+                    search_sort=evidence_search_sort,
                 )
             if args.approved_places:
                 user_labels: Dict[str, str] = {}

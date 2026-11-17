@@ -333,6 +333,74 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual(packet["외부 조회"][0]["provider"], "host_web_search")
         self.assertEqual(packet["외부 조회"][0]["max_results"], 10)
         self.assertIn("검색 URL", packet["검색 링크 대체"])
+        self.assertEqual(packet["검색 계약"]["버전"], 1)
+        self.assertEqual(packet["검색 계약"]["최대 후보 수"], 10)
+        self.assertEqual(packet["검색 설정"]["sort"], "추천순")
+        self.assertEqual(packet["후보 수"]["현재 페이지"], 0)
+        self.assertEqual(packet["후보 수"]["상태"], "검색 전")
+        self.assertEqual(packet["외부 조회"][0]["result_contract"]["sort"], "추천순")
+
+    def test_host_place_search_normalizes_sort_and_filters_without_api(self):
+        packet = engine.prepare_host_place_search(
+            "카페", "후쿠오카", sort="DISTANCE",
+            search_filters={"includedType": "cafe", "openNow": True, "거리": "2km"},
+        )
+        self.assertEqual(packet["정렬"], "거리순")
+        self.assertEqual(packet["검색 설정"]["sort"], "거리순")
+        self.assertEqual(packet["검색 설정"]["filters"], {
+            "included_type": "cafe", "open_now": True, "distance": "2km",
+        })
+        self.assertEqual(packet["외부 조회"][0]["sort"], "거리순")
+        self.assertEqual(packet["외부 조회"][0]["filters"]["included_type"], "cafe")
+
+    def test_host_candidates_use_the_same_contract_and_dedupe_as_api(self):
+        packet = engine.prepare_place_candidate_page(
+            [
+                {"name": "모모치", "formattedAddress": "후쿠오카", "primaryType": "공원",
+                 "googleMapsUri": "https://maps.google.com/?cid=momochi", "rank": 2},
+                {"name": "오호리 공원", "formattedAddress": "후쿠오카", "primaryType": "공원",
+                 "googleMapsUri": "https://maps.google.com/?cid=ohori", "rank": 1},
+                # Same map URL: the lower-ranked duplicate must not consume a slot.
+                {"name": "오호리 공원", "formattedAddress": "후쿠오카", "primaryType": "공원",
+                 "googleMapsUri": "https://maps.google.com/?cid=ohori", "rank": 3},
+            ],
+            "후쿠오카",
+            query="공원",
+            search_filters={"kind": "공원", "openNow": True, "budget": "중간"},
+        )
+        self.assertEqual([row["추천 순위"] for row in packet["후보"]], [1, 2])
+        self.assertEqual(packet["전체 후보 수"], 2)
+        self.assertEqual(packet["후보 수"]["전체"], 2)
+        self.assertEqual(packet["중복 제거 수"], 1)
+        self.assertEqual(packet["검색 설정"]["filters"], {
+            "kind": "공원", "open_now": True, "budget": "중간",
+        })
+        self.assertEqual(packet["정렬"], "추천순")
+        self.assertEqual(packet["후보"][0]["검색 제공자"], "호스트 웹 검색")
+        self.assertEqual(packet["후보"][0]["여행지 확인"], "확인 완료")
+
+    def test_host_evidence_wrapper_preserves_query_and_filter_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "host-results.json"
+            evidence_path.write_text(json.dumps({
+                "query": "후쿠오카 카페",
+                "destination": "후쿠오카",
+                "provider": "호스트 웹 검색",
+                "sort": "추천순",
+                "filters": {"kind": "카페", "open_now": False},
+                "evidence": [{"name": "카페 A", "region": "후쿠오카"}],
+            }, ensure_ascii=False), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = engine.main([
+                    "places", "--destination", "후쿠오카",
+                    "--evidence-input", str(evidence_path),
+                ])
+        self.assertEqual(result, 0)
+        packet = json.loads(output.getvalue())
+        self.assertEqual(packet["검색 설정"]["query"], "후쿠오카 카페")
+        self.assertEqual(packet["검색 설정"]["filters"], {"kind": "카페", "open_now": False})
+        self.assertEqual(packet["후보"][0]["검색 제공자"], "호스트 웹 검색")
 
     def test_google_maps_search_url_is_not_treated_as_a_place(self):
         search_url = engine.build_google_maps_search_url("카페", "후쿠오카")
@@ -534,6 +602,10 @@ class TripEngineTests(unittest.TestCase):
         self.assertEqual([row["추천 순위"] for row in packet["후보"]], list(range(11, 21)))
         self.assertTrue(packet["다음 후보 있음"])
         self.assertEqual(packet["후속 검색 상태"]["page_token"], "next-token")
+        self.assertEqual(packet["검색 계약"]["버전"], 1)
+        self.assertEqual(packet["검색 설정"]["offset"], 10)
+        self.assertEqual(packet["후보 수"]["시작 순위"], 11)
+        self.assertTrue(packet["후보 수"]["다음 묶음 있음"])
 
     def test_google_place_page_marks_destination_mismatch_and_requires_session_match(self):
         with patch.object(
