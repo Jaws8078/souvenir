@@ -1029,7 +1029,31 @@ def parse_place_lines(content: str, *, resolve_short_links: bool = True,
 
 
 def _location_token(value_: Any) -> str:
-    return re.sub(r"[^0-9a-z가-힣]", "", text(value_).lower())
+    return re.sub(r"[\W_]", "", text(value_).lower())
+
+
+# Google can return Latin/native-script addresses even with languageCode=ko.
+# These are spelling aliases, not evidence inferred from the search query.
+DESTINATION_ALIASES = (
+    ("후쿠오카", "fukuoka", "福岡"),
+    ("도쿄", "tokyo", "東京"),
+    ("오사카", "osaka", "大阪"),
+    ("교토", "kyoto", "京都"),
+    ("삿포로", "sapporo", "札幌"),
+    ("나고야", "nagoya", "名古屋"),
+    ("서울", "seoul"),
+    ("부산", "busan"),
+    ("제주", "jeju"),
+)
+
+
+def _destination_aliases(destination: str) -> set[str]:
+    token = _location_token(destination)
+    for aliases in DESTINATION_ALIASES:
+        normalized = {_location_token(alias) for alias in aliases}
+        if token in normalized:
+            return normalized
+    return {token} if token else set()
 
 
 def _place_match_status(destination: str, region: str,
@@ -1042,15 +1066,17 @@ def _place_match_status(destination: str, region: str,
     if text(evidence.get("matched_destination")):
         matched = _location_token(evidence.get("matched_destination"))
         destination_token = _location_token(destination)
-        if matched and destination_token and (destination_token in matched or matched in destination_token):
+        if matched and destination_token and any(alias in matched for alias in _destination_aliases(destination)):
             return "확인 완료"
         if matched:
             return "불일치"
     destination_token = _location_token(destination)
     region_token = _location_token(region)
     if destination_token and region_token:
-        if destination_token in region_token or region_token in destination_token:
+        if any(alias in region_token for alias in _destination_aliases(destination)):
             return "확인 완료"
+        if any(_location_token(alias) in region_token for group in DESTINATION_ALIASES for alias in group):
+            return "불일치"
         # A short district name such as ``하카타`` cannot be safely compared to
         # ``후쿠오카`` without geocoding evidence.  Keep it pending rather than
         # falsely rejecting a valid place.
@@ -1341,11 +1367,17 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
     """Search Google Places (New) and return the same review packet as host search."""
     if page_index < 0:
         raise ValueError("Google Maps 후보 페이지 번호는 0 이상이어야 합니다.")
+    if page_size <= 0:
+        raise ValueError("Google Maps 후보 페이지 크기는 1 이상이어야 합니다.")
+    if page_index and not page_token:
+        raise ValueError("Google Maps 다음 페이지에는 페이지 토큰이 필요합니다.")
     if page_token and not session_state:
         raise ValueError("Google Maps 다음 페이지는 이전 검색 세션 상태와 함께 요청해야 합니다.")
     if page_token and session_state:
         expected_page_size = min(page_size, DEFAULT_PLACE_PAGE_SIZE)
         expected = {
+            "destination": text(destination),
+            "page_index": page_index,
             "query": text(query),
             "language_code": text(language_code),
             "region_code": text(region_code).upper(),
@@ -1377,10 +1409,19 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
         included_type=included_type, location_bias=location_bias,
         summary_only=summary_only, timeout=timeout,
     )
-    candidates = list(search["candidates"])
+    seen_ids = set((session_state or {}).get("seen_place_ids", []))
+    candidates = []
+    for candidate in search["candidates"]:
+        place_id = text(candidate.get("place_id"))
+        if place_id and place_id in seen_ids:
+            continue
+        if place_id:
+            seen_ids.add(place_id)
+        candidates.append(candidate)
+    removed = len(search["candidates"]) - len(candidates)
     # A Google page is already sliced by the provider; rank it globally without
     # asking the generic paginator to slice the page a second time.
-    base_rank = page_index * provider_page_size
+    base_rank = int((session_state or {}).get("shown_count", page_index * provider_page_size))
     for index, candidate in enumerate(candidates):
         candidate["추천 순위"] = base_rank + index + 1
     packet = prepare_place_candidate_page(
@@ -1399,7 +1440,7 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
         row["검색 제공자"] = search["source"]
         row["Google Maps 제공"] = True
         row["여행지 확인"] = _place_match_status(
-            text(destination), text(row.get("지역")), {"matched_destination": row.get("지역")}
+            text(destination), text(row.get("지역"))
         )
         row["저장 가능"] = False
     next_token = search.get("next_page_token") or ""
@@ -1410,6 +1451,11 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
         "Google Maps 표시 고지": GOOGLE_MAPS_ATTRIBUTION_TEXT,
         "Google Maps 로고 필요": True,
         "검색 순위 안내": GOOGLE_SEARCH_RANKING_NOTICE,
+        "현재 페이지": page_index + 1,
+        "현재 시작": base_rank + 1 if packet["후보"] else None,
+        "현재 종료": base_rank + len(packet["후보"]) if packet["후보"] else None,
+        "전체 후보 수": "미확인" if has_more else base_rank + len(packet["후보"]),
+        "중복 제거 수": removed + packet["중복 제거 수"],
         "정책 상태": "후보 화면에서만 표시 · 저장 전 사용자 입력 라벨 필요",
         "검색 설정": {
             **packet.get("검색 설정", {}),
@@ -1429,6 +1475,9 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
         "확인 질문": "후보 번호와 Notion에 표시할 내 이름을 알려주세요. 예: 2번은 ‘오호리 산책’으로 저장해줘",
         # This is host state, not a value to save in Notion or display as a URL.
         "후속 검색 상태": {
+            "destination": text(destination),
+            "seen_place_ids": sorted(seen_ids),
+            "shown_count": base_rank + len(packet["후보"]),
             "page_index": page_index + 1 if has_more else None,
             "page_token": next_token or None,
             "page_size": provider_page_size,
@@ -1447,7 +1496,7 @@ def prepare_google_place_candidate_page(query: str, api_key: str, destination: s
     # keep the legacy page count fields while making the normalized count
     # contract explicit and consistent with the host-search path.
     packet["후보 수"].update({
-        "전체": "미확인" if has_more else len(packet["후보"]),
+        "전체": "미확인" if has_more else base_rank + len(packet["후보"]),
         "현재 페이지": len(packet["후보"]),
         "시작 순위": base_rank + 1 if candidates else None,
         "종료 순위": base_rank + len(packet["후보"]) if candidates else None,
@@ -2141,13 +2190,16 @@ def google_places_text_search(query: str, api_key: str, *,
     except urllib.error.HTTPError as error:
         # Do not echo the request URL or API key into the chat/log output.
         detail = ""
+        reasons = set()
         try:
             raw = error.read(4096).decode("utf-8", errors="replace")
-            detail = text(json.loads(raw).get("error", {}).get("message"))
+            provider_error = json.loads(raw).get("error", {})
+            detail = text(provider_error.get("message"))
+            reasons = {item.get("reason") for item in provider_error.get("details", []) if isinstance(item, dict)}
         except (OSError, ValueError, TypeError):
             pass
         suffix = f": {_redact_secret(detail, secret)}" if detail else ""
-        if error.code in {401, 403}:
+        if error.code in {401, 403} or (error.code == 400 and "API_KEY_INVALID" in reasons):
             error_code, retryable = "GOOGLE_AUTH", False
         elif error.code == 429:
             error_code, retryable = "GOOGLE_RATE_LIMIT", True

@@ -20,6 +20,86 @@ SPEC.loader.exec_module(engine)
 
 
 class TripEngineTests(unittest.TestCase):
+    def test_google_mixed_language_addresses_can_be_approved(self):
+        for address in ("일본 〒812-0038 Fukuoka, Hakata Ward", "福岡県福岡市博多区", "후쿠오카시 하카타구"):
+            with self.subTest(address=address):
+                with patch.object(engine, "google_places_text_search", return_value={
+                    "query": "후쿠오카 카페", "source": "Google Places API (New)",
+                    "next_page_token": "", "candidates": [{
+                        "name": "카페", "region": address, "place_id": "cafe-id",
+                        "googleMapsUri": "https://maps.google.com/?cid=1",
+                    }],
+                }):
+                    packet = engine.prepare_google_place_candidate_page("후쿠오카 카페", "secret", "후쿠오카")
+                self.assertEqual(packet["후보"][0]["여행지 확인"], "확인 완료")
+                self.assertEqual(len(engine.confirm_place_rows(packet, ["1"], {"1": "내 카페"})), 1)
+        self.assertEqual(engine._place_match_status("후쿠오카", "도쿄도 Tokyo"), "불일치")
+        self.assertEqual(engine._place_match_status("알 수 없는 도시", "unknown locality"), "확인 필요")
+        self.assertNotEqual(engine._location_token("東京"), engine._location_token("京都"))
+
+    def test_google_final_page_counts_only_new_candidates_across_pages(self):
+        answers = [
+            {"query": "카페", "source": "Google Places API (New)", "next_page_token": "next",
+             "candidates": [{"name": "A", "place_id": "a"}, {"name": "B", "place_id": "b"}]},
+            {"query": "카페", "source": "Google Places API (New)", "next_page_token": "",
+             "candidates": [{"name": "B", "place_id": "b"}, {"name": "C", "place_id": "c"}]},
+        ]
+        with patch.object(engine, "google_places_text_search", side_effect=answers):
+            first = engine.prepare_google_place_candidate_page("카페", "secret", "후쿠오카", page_size=2)
+            state = first["후속 검색 상태"]
+            last = engine.prepare_google_place_candidate_page(
+                "카페", "secret", "후쿠오카", page_size=2,
+                page_token="next", page_index=1, session_state=state,
+            )
+        self.assertEqual(last["후보 수"]["전체"], 3)
+        self.assertEqual(last["전체 후보 수"], 3)
+        self.assertEqual(last["현재 페이지"], 2)
+        self.assertEqual(last["중복 제거 수"], 1)
+        self.assertEqual([r["추천 순위"] for r in last["후보"]], [3])
+        self.assertFalse(last["다음 후보 있음"])
+        for destination, index in (("도쿄", 1), ("후쿠오카", 8)):
+            with patch.object(engine, "google_places_text_search") as search:
+                with self.assertRaises(ValueError):
+                    engine.prepare_google_place_candidate_page(
+                        "카페", "secret", destination, page_size=2,
+                        page_token="next", page_index=index, session_state=state,
+                    )
+                search.assert_not_called()
+
+    def test_google_http_400_invalid_key_is_auth_not_bad_query(self):
+        error = urllib.error.HTTPError(engine.GOOGLE_PLACES_ENDPOINT, 400, "bad request", {}, None)
+        error.read = lambda _size=-1: json.dumps({"error": {
+            "message": "API key not valid: secret", "details": [{"reason": "API_KEY_INVALID"}],
+        }}).encode()
+        with patch.object(engine.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(engine.GooglePlacesError) as raised:
+                engine.google_places_text_search("카페", "secret")
+        self.assertEqual(raised.exception.error_code, "GOOGLE_AUTH")
+        self.assertNotIn("secret", str(raised.exception))
+
+    def test_google_transport_failures_and_invalid_json_are_classified(self):
+        for cause in (TimeoutError("secret"), urllib.error.URLError("secret")):
+            with self.subTest(cause=type(cause).__name__):
+                with patch.object(engine.urllib.request, "urlopen", side_effect=cause):
+                    with self.assertRaises(engine.GooglePlacesError) as raised:
+                        engine.google_places_text_search("카페", "secret")
+                self.assertEqual(raised.exception.error_code, "GOOGLE_UNAVAILABLE")
+                self.assertTrue(raised.exception.retryable)
+                self.assertNotIn("secret", str(raised.exception))
+        class BadResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self):
+                return b"not-json secret"
+        with patch.object(engine.urllib.request, "urlopen", return_value=BadResponse()):
+            with self.assertRaises(engine.GooglePlacesError) as raised:
+                engine.google_places_text_search("카페", "secret")
+        self.assertEqual(raised.exception.error_code, "GOOGLE_RESPONSE_INVALID")
+        self.assertFalse(raised.exception.retryable)
+        self.assertNotIn("secret", str(raised.exception))
+
     def test_error_packet_classifies_input_and_external_failures(self):
         invalid = engine.error_packet(ValueError("필수 값 누락"), "places")
         self.assertEqual(invalid["error_code"], "INPUT_INVALID")
@@ -584,6 +664,7 @@ class TripEngineTests(unittest.TestCase):
                 "후쿠오카 관광지", "secret-key", "후쿠오카", page_index=1,
                 page_token="previous-token",
                 session_state={
+                    "destination": "후쿠오카",
                     "page_token": "previous-token",
                     "page_index": 1,
                     "query": "후쿠오카 관광지",
@@ -695,7 +776,7 @@ class TripEngineTests(unittest.TestCase):
         self.assertNotIn("secret-key", request.data.decode("utf-8"))
 
     def test_google_http_errors_are_classified_and_secret_is_redacted(self):
-        cases = ((401, "GOOGLE_AUTH", False), (429, "GOOGLE_RATE_LIMIT", True), (503, "GOOGLE_UNAVAILABLE", True))
+        cases = ((401, "GOOGLE_AUTH", False), (403, "GOOGLE_AUTH", False), (429, "GOOGLE_RATE_LIMIT", True), (503, "GOOGLE_UNAVAILABLE", True))
         for status, expected_code, retryable in cases:
             with self.subTest(status=status):
                 error = urllib.error.HTTPError(
@@ -721,6 +802,7 @@ class TripEngineTests(unittest.TestCase):
                 "후쿠오카 관광지", "secret-key", "후쿠오카", page_index=1,
                 page_token="expired-token",
                 session_state={
+                    "destination": "후쿠오카",
                     "page_token": "expired-token",
                     "page_index": 1,
                     "query": "후쿠오카 관광지",
