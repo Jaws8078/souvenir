@@ -80,7 +80,7 @@ class KiwiClient:
     def search(self, arguments):
         # Live KRW searches returned zero with price_to even when the same
         # unfiltered search returned a cheaper itinerary. Apply the user's
-        # KRW budget annotation locally in normalize(); retain over-budget rows.
+        # KRW ceiling locally in normalize(), never relax it for display.
         remote_arguments = {k: v for k, v in arguments.items() if k != "price_to"}
         init = self.rpc("initialize", {"protocolVersion": PROTOCOL, "capabilities": {},
                                       "clientInfo": {"name": "souvenir", "version": "1.0"}})
@@ -181,6 +181,8 @@ def normalize(data, args, kg):
         price = row.get("price")
         if type(price) not in (int, float) or not math.isfinite(price) or price <= 0:
             reasons.append("INVALID_PRICE")
+        elif price > args.get("price_to", float("inf")):
+            reasons.append("OVER_BUDGET")
         for leg_name, date_key, prefix in (("outbound", "departureDate", "dtime"),
                                            ("inbound", "returnDate", "ret_dtime")):
             if not args.get(date_key):
@@ -220,9 +222,6 @@ def normalize(data, args, kg):
         seen.add(identity)
         candidates.append({"itinerary": row, "price_scope": "all_passengers_return" if args.get("returnDate")
                            else "all_passengers_oneway", "verification": "needs_check",
-                           "budget_status": ("not_set" if "price_to" not in args else
-                                             "over_budget" if price > args["price_to"] else "within_budget"),
-                           "budget_excess_total": max(0, price - args["price_to"]) if "price_to" in args else None,
                            "checks_needed": ["final_fare_conditions", "per_traveler_baggage_allowance",
                                              "city_airport_match_and_transfer_conditions"]
                            + (["checked_bag_weight_kg"] if kg is not None else [])})
@@ -231,7 +230,7 @@ def normalize(data, args, kg):
             "minimum_checked_bag_kg": kg, "returned_count": len(data["itineraries"]),
             "candidates": candidates, "rejected": rejected,
             "coverage": "provider_returned_results_only", "all_market_flights_verified": False,
-            "budget_filter": "annotate_only",
+            "budget_filter": "local_krw_total",
             "notion_written": False}
 
 
