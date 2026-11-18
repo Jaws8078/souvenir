@@ -118,6 +118,10 @@ class FlightTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in rpc.call_args_list],
                          ["initialize", "notifications/initialized", "tools/list", "tools/call"])
         self.assertEqual(rpc.call_args_list[-1].args[1]["name"], "search-flight")
+        remote = rpc.call_args_list[-1].args[1]["arguments"]
+        self.assertNotIn("price_to", remote)
+        self.assertEqual(args["price_to"], 740000)
+        self.assertEqual(remote["adults_hold_bags"], [1, 1])
 
     def test_unsupported_remote_filter_never_calls_search(self):
         args, _ = kiwi.validate_input(search_input())

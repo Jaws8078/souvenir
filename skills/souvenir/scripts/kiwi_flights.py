@@ -78,6 +78,10 @@ class KiwiClient:
             raise FlightError("KIWI_NETWORK_ERROR") from exc
 
     def search(self, arguments):
+        # Live KRW searches returned zero with price_to even when the same
+        # unfiltered search returned a cheaper itinerary. Apply the user's
+        # KRW ceiling locally in normalize(), never relax it for display.
+        remote_arguments = {k: v for k, v in arguments.items() if k != "price_to"}
         init = self.rpc("initialize", {"protocolVersion": PROTOCOL, "capabilities": {},
                                       "clientInfo": {"name": "souvenir", "version": "1.0"}})
         self.protocol = init.get("protocolVersion", PROTOCOL)
@@ -87,9 +91,9 @@ class KiwiClient:
         if not tool:
             raise FlightError("KIWI_SEARCH_TOOL_UNAVAILABLE")
         schema = tool.get("inputSchema", {})
-        if not set(arguments) <= set(schema.get("properties", {})):
+        if not set(remote_arguments) <= set(schema.get("properties", {})):
             raise FlightError("KIWI_UNSUPPORTED_FILTER")
-        result = self.rpc("tools/call", {"name": "search-flight", "arguments": arguments})
+        result = self.rpc("tools/call", {"name": "search-flight", "arguments": remote_arguments})
         if result.get("isError"):
             raise FlightError("KIWI_SEARCH_ERROR")
         data = result.get("structuredContent")
@@ -226,6 +230,7 @@ def normalize(data, args, kg):
             "minimum_checked_bag_kg": kg, "returned_count": len(data["itineraries"]),
             "candidates": candidates, "rejected": rejected,
             "coverage": "provider_returned_results_only", "all_market_flights_verified": False,
+            "budget_filter": "local_krw_total",
             "notion_written": False}
 
 
