@@ -41,15 +41,24 @@ class FlightTests(unittest.TestCase):
 
     def test_provider_returning_wrong_conditions_is_rejected(self):
         args, kg = kiwi.validate_input(search_input())
-        for field in ("price", "date", "time", "url"):
+        for field in ("date", "time", "url"):
             data = response()
             row = data["itineraries"][0]
-            if field == "price": row["price"] = 750000
             if field == "date": row["outbound"]["departureTime"] = "2026-12-20T09:00:00"
             if field == "time": row["inbound"]["departureTime"] = "2026-12-23T12:00:00"
             if field == "url": row["bookingUrl"] = "https://evil.example/"
             with self.subTest(field=field):
                 self.assertEqual(kiwi.normalize(data, args, kg)["status"], "no_matches")
+
+    def test_over_budget_results_are_displayed_with_excess(self):
+        args, kg = kiwi.validate_input(search_input())
+        data = response()
+        data["itineraries"][0]["price"] = 900000
+        result = kiwi.normalize(data, args, kg)
+        self.assertEqual(result["status"], "candidates")
+        self.assertEqual(result["candidates"][0]["budget_status"], "over_budget")
+        self.assertEqual(result["candidates"][0]["budget_excess_total"], 160000)
+        self.assertEqual(result["rejected"], [])
 
     def test_no_local_candidate_cap_and_exact_duplicates_removed(self):
         args, kg = kiwi.validate_input(search_input())
