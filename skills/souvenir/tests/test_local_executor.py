@@ -30,6 +30,11 @@ class LocalExecutorTests(unittest.TestCase):
             self.assertEqual(runner.main(["refresh", "--pretty"]), 7)
         engine.assert_called_once_with(["refresh", "--pretty"])
 
+    def test_flights_delegate_to_readonly_kiwi_client(self):
+        with patch("run_souvenir.flights_main", return_value=0) as flights:
+            self.assertEqual(runner.main(["flights", "--input", "request.json"]), 0)
+        flights.assert_called_once_with(["--input", "request.json"])
+
     def test_template_gate_commands_delegate_to_host_state_machine(self):
         with patch("run_souvenir.template_gate_main", return_value=3) as gate:
             self.assertEqual(runner.main(["template-gate", "plan", "--capability", "manual"]), 3)

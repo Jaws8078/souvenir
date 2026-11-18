@@ -97,7 +97,7 @@ Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽
 
 - 첫 사용·설치·로그인·필수 정보 입력: [온보딩](references/onboarding.md). 최초 사용은 연결 확인 → 스킬 확인 → 로그인 확인 → 템플릿 연결 → 기본 정보 입력 순서이며, 완료한 단계와 이미 받은 정보는 재사용한다.
 - 대화로 여행 계획을 이어갈 때: [대화형 계획 마법사](references/conversation-flow.md). 선택한 파트만 질문하고, 모르는 값은 미정으로 남긴다.
-- 예약 전 항공권을 찾고 비교할 때: [항공권 웹 검색](references/flight-search.md). API 없이 비교 사이트에서 탐색하고 실제 판매처의 날짜·인원별 가격과 조건을 확인한 뒤 선택한 후보를 저장한다.
+- 예약 전 항공권을 찾고 비교할 때: [항공 검색](references/flight-search.md). Kiwi 공식 MCP를 우선 사용하고, 로컬 실행기는 `scripts/run_souvenir.py flights --input <JSON>`으로 조회한다. 웹은 조건 보완·오류 시 대체 경로로 사용하고 선택한 후보만 저장한다.
 - 실제 입력·저장·표시를 바꿀 때: [간편 입력 규칙](references/input-design.md).
 - 템플릿 연결, 여행·일정·장소·항공·숙소·예약 데이터 작업: [데이터 운영 규칙](references/data-operations.md).
 - 지갑·예산·지출·환산·분담·정산: [금액과 정산](references/finance.md).
