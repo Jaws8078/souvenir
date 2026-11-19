@@ -79,6 +79,29 @@ class PilotHotelTests(unittest.TestCase):
         self.assertEqual(rpc.call_args_list[-2].args[1]["arguments"]["offset"], 0)
         self.assertEqual(rpc.call_args_list[-1].args[1]["arguments"]["offset"], 50)
 
+    def test_search_retries_transient_provider_error(self):
+        args, _, _, _ = pilot.validate_input(search_input())
+        client = pilot.PilotHotelClient()
+        properties = {key: {} for key in args}
+        transient_error = {"isError": True, "content": [{"type": "text", "text": "temporary"}]}
+        success = {"structuredContent": {"hotels": [], "returned": 0, "has_more": False, "next_offset": None}}
+        with patch.object(
+            client,
+            "rpc",
+            side_effect=[
+                {"protocolVersion": "2025-03-26"},
+                {},
+                {"tools": [{"name": "search_hotels", "inputSchema": {"properties": properties}}]},
+                transient_error,
+                success,
+            ],
+        ) as rpc, patch.object(pilot.time, "sleep") as sleep:
+            raw = client.search(args, max_pages=1)
+        self.assertEqual(raw["hotels"], [])
+        self.assertEqual(rpc.call_count, 5)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(sleep.call_args.args[0], pilot.DEFAULT_RETRY_BACKOFF_SECONDS)
+
     def test_remote_search_does_not_receive_local_budget(self):
         args, _, _, _ = pilot.validate_input(search_input())
         client = pilot.PilotHotelClient()

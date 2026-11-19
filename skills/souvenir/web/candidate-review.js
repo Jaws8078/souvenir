@@ -241,7 +241,46 @@
       message: error?.message || fallback,
       status: "검색 확인 필요",
       session: false,
+      fallback: error?.fallback || "",
     };
+  }
+
+  function retryableSearchError(error) {
+    return error?.retryable === true || error?.code === "SEARCH_FAILED";
+  }
+
+  function waitForRetry(milliseconds) {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  }
+
+  async function requestSearch(section, conditions, signal) {
+    let attempt = 0;
+    while (true) {
+      const response = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ section: section.key, conditions }),
+        signal,
+      });
+      let payload;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        error.retryable = false;
+        throw error;
+      }
+      if (response.ok) return payload;
+      const providerError = new Error(payload.message || "검색을 완료하지 못했어요.");
+      providerError.code = payload.error;
+      providerError.retryable = payload.retryable === true;
+      providerError.fallback = payload.fallback || "";
+      if (!retryableSearchError(providerError) || attempt >= 1) throw providerError;
+      attempt += 1;
+      elements.editorStatus.classList.remove("is-error");
+      elements.editorStatus.textContent = `${section.label} 검색 공급자가 응답하지 않아 자동으로 다시 시도하고 있어요…`;
+      elements.status.textContent = `${section.label} 검색 재시도 중… (${attempt + 1}/2)`;
+      await waitForRetry(2500);
+    }
   }
 
   function setSessionRefreshVisible(visible) {
@@ -597,27 +636,20 @@
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 120000);
     try {
-      const response = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ section: section.key, conditions: collectConditions() }),
-        signal: controller.signal,
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        const providerError = new Error(payload.message || "검색을 완료하지 못했어요.");
-        providerError.code = payload.error;
-        throw providerError;
-      }
+      const payload = await requestSearch(section, collectConditions(), controller.signal);
       resetResultState(payload.results);
       render();
       elements.editorStatus.textContent = "검색 결과를 갱신했어요. 이전 선택은 새 결과에 맞춰 초기화됐어요.";
       elements.status.textContent = "검색 완료 · 같은 화면에서 결과 갱신";
     } catch (error) {
       const notice = friendlyError(error, "검색을 완료하지 못했어요. 조건을 확인하고 다시 시도해주세요.");
-      elements.editorStatus.textContent = notice.message;
+      elements.editorStatus.textContent = notice.fallback === "host_web_search"
+        ? "숙소 공급자가 계속 응답하지 않아 기존 결과를 유지했어요. 잠시 후 다시 검색해주세요."
+        : notice.message;
       elements.editorStatus.classList.add("is-error");
-      elements.status.textContent = notice.session ? notice.status : "재검색 실패 · 기존 결과 유지";
+      elements.status.textContent = notice.session
+        ? notice.status
+        : (notice.fallback === "host_web_search" ? "숙소 공급자 지연 · 기존 결과 유지" : "재검색 실패 · 기존 결과 유지");
       setSessionRefreshVisible(notice.session);
     } finally {
       window.clearTimeout(timeout);

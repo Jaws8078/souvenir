@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -69,6 +70,8 @@ class CandidateReviewTests(unittest.TestCase):
         self.assertIn('id="empty-title"', html)
         self.assertIn("검색 세션이 만료됐어요.", javascript)
         self.assertIn('fetch("/api/health"', javascript)
+        self.assertIn("검색 공급자가 응답하지 않아 자동으로 다시 시도하고 있어요", javascript)
+        self.assertIn("기존 결과를 유지했어요", javascript)
         self.assertNotIn('error.message || "결과를 불러오지 못했어요."', javascript)
 
     def test_normalize_combined_packet_has_three_sections_and_public_context(self):
@@ -157,6 +160,30 @@ class CandidateReviewTests(unittest.TestCase):
         self.assertEqual(hotel["hotel"]["name"], "새 난바 호텔")
         self.assertEqual(hotel["room_rate_verification"]["matching_offers"][0]["roomName"], "Twin Room")
 
+    def test_hotel_provider_error_is_translated_before_http_response(self):
+        source = {
+            "trip": {"destination": "오사카"},
+            "sections": {"hotels": {"provider": "pilot-mcp", "candidates": []}},
+        }
+        fake_client = Mock()
+        fake_client.search.side_effect = review.HotelError("PILOT_HOTEL_SEARCH_ERROR")
+        with patch.object(review, "PilotHotelClient", return_value=fake_client):
+            with self.assertRaises(review.ReviewSearchError) as raised:
+                review.requery_source_packet(source, "hotels", {
+                    "location": "난바",
+                    "check_in": "2026-12-19",
+                    "check_out": "2026-12-23",
+                    "guests": 2,
+                    "rooms": 1,
+                    "budget_per_night_krw": 100000,
+                    "room_filters": {"bed_type": "트윈", "refundable_only": True},
+                })
+        self.assertEqual(raised.exception.code, "HOTEL_SEARCH_PROVIDER")
+        self.assertIn("숙소 검색 공급자 응답", str(raised.exception))
+        self.assertNotIn("PILOT_HOTEL_SEARCH_ERROR", str(raised.exception))
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.fallback, "host_web_search")
+
     def test_http_search_updates_results_on_same_server(self):
         provider_result = {
             "currency": "KRW",
@@ -192,6 +219,38 @@ class CandidateReviewTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_http_hotel_error_returns_safe_retry_and_fallback_metadata(self):
+        result = review.normalize_packet(packet())
+        server = review.build_server(result, port=0, source_packet=packet())
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        fake_client = Mock()
+        fake_client.search.side_effect = review.HotelError("PILOT_HOTEL_SEARCH_ERROR")
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            body = json.dumps({"section": "hotels", "conditions": {
+                "location": "난바",
+                "check_in": "2026-12-19",
+                "check_out": "2026-12-23",
+                "guests": 2,
+                "rooms": 1,
+                "budget_per_night_krw": 100000,
+                "room_filters": {"bed_type": "트윈", "refundable_only": True},
+            }}).encode("utf-8")
+            request = urllib.request.Request(base + "/api/search", data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with patch.object(review, "PilotHotelClient", return_value=fake_client):
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=3)
+            payload = json.loads(raised.exception.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.assertEqual(raised.exception.code, 502)
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["fallback"], "host_web_search")
+        self.assertNotIn("PILOT_HOTEL_SEARCH_ERROR", payload["message"])
 
     def test_http_server_serves_ui_and_records_selection(self):
         result = review.normalize_packet(packet())

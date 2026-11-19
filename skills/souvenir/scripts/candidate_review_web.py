@@ -32,14 +32,20 @@ WEB_DIR = SCRIPT_DIR.parent / "web"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from kiwi_flights import KiwiClient, normalize as normalize_flights, validate_input as validate_flight_input  # noqa: E402
+from kiwi_flights import (  # noqa: E402
+    FlightError,
+    KiwiClient,
+    normalize as normalize_flights,
+    validate_input as validate_flight_input,
+)
 from pilot_hotels import (  # noqa: E402
+    HotelError,
     PilotHotelClient,
     apply_room_filters,
     normalize as normalize_hotels,
     validate_input as validate_hotel_input,
 )
-from trip_engine import prepare_google_place_candidate_page  # noqa: E402
+from trip_engine import GooglePlacesError, prepare_google_place_candidate_page  # noqa: E402
 
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -512,10 +518,26 @@ def normalize_packet(raw: Any, explicit_kind: Optional[str] = None) -> Dict[str,
 class ReviewSearchError(ValueError):
     """A safe, user-facing error raised while refreshing one result tab."""
 
-    def __init__(self, message: str, code: str = "SEARCH_FAILED", status: int = 422):
+    def __init__(self, message: str, code: str = "SEARCH_FAILED", status: int = 422,
+                 *, retryable: bool = False, fallback: Optional[str] = None):
         super().__init__(message)
         self.code = code
         self.status = status
+        self.retryable = retryable
+        self.fallback = fallback
+
+
+def _safe_provider_error_message(section: str, code: Any) -> str:
+    """Translate provider codes into useful Korean without leaking internals."""
+    normalized = _text(getattr(code, "error_code", code)).upper()
+    label = SECTION_DEFS.get(section, {}).get("label", "검색")
+    if normalized.startswith("INPUT_"):
+        return f"{label} 검색 조건을 확인해주세요."
+    if any(token in normalized for token in ("AUTH", "ACCESS_DENIED", "SESSION", "EXPIRED")):
+        return f"{label} 검색 연결이 만료됐어요. 세션 새로고침 후 다시 시도해주세요."
+    if any(token in normalized for token in ("NETWORK", "TIMEOUT", "HTTP", "RPC", "SEARCH_ERROR", "UNAVAILABLE")):
+        return f"{label} 검색 공급자 응답을 받지 못했어요. 잠시 후 다시 시도해주세요."
+    return f"{label} 검색을 완료하지 못했어요. 잠시 후 다시 시도해주세요."
 
 
 def _section_from_source(source: Mapping[str, Any], section: str) -> Mapping[str, Any]:
@@ -624,8 +646,17 @@ def _search_flights(source_section: Mapping[str, Any], conditions: Mapping[str, 
         return normalize_flights(raw, args, checked_bag_kg)
     except ReviewSearchError:
         raise
+    except FlightError as exc:
+        raise ReviewSearchError(
+            _safe_provider_error_message("flights", exc),
+            "FLIGHT_SEARCH_PROVIDER",
+            502,
+        ) from exc
     except (ValueError, TypeError) as exc:
-        raise ReviewSearchError(str(exc), "FLIGHT_SEARCH_INVALID") from exc
+        raise ReviewSearchError(
+            _safe_provider_error_message("flights", "INPUT_INVALID"),
+            "FLIGHT_SEARCH_INVALID",
+        ) from exc
 
 
 def _search_hotels(source_section: Mapping[str, Any], conditions: Mapping[str, Any]) -> Dict[str, Any]:
@@ -665,8 +696,19 @@ def _search_hotels(source_section: Mapping[str, Any], conditions: Mapping[str, A
         return apply_room_filters(client, result, args, validated_room_filters)
     except ReviewSearchError:
         raise
+    except HotelError as exc:
+        raise ReviewSearchError(
+            _safe_provider_error_message("hotels", exc),
+            "HOTEL_SEARCH_PROVIDER",
+            502,
+            retryable=True,
+            fallback="host_web_search",
+        ) from exc
     except (ValueError, TypeError) as exc:
-        raise ReviewSearchError(str(exc), "HOTEL_SEARCH_INVALID") from exc
+        raise ReviewSearchError(
+            _safe_provider_error_message("hotels", "INPUT_INVALID"),
+            "HOTEL_SEARCH_INVALID",
+        ) from exc
 
 
 def _search_places(source_section: Mapping[str, Any], conditions: Mapping[str, Any]) -> Dict[str, Any]:
@@ -702,8 +744,17 @@ def _search_places(source_section: Mapping[str, Any], conditions: Mapping[str, A
             location_bias=source_search.get("location_bias") or {},
             summary_only=bool(source_search.get("summary_only", False)),
         )
+    except GooglePlacesError as exc:
+        raise ReviewSearchError(
+            _safe_provider_error_message("places", exc),
+            "PLACE_SEARCH_PROVIDER",
+            502,
+        ) from exc
     except (ValueError, TypeError) as exc:
-        raise ReviewSearchError(str(exc), "PLACE_SEARCH_INVALID") from exc
+        raise ReviewSearchError(
+            _safe_provider_error_message("places", "INPUT_INVALID"),
+            "PLACE_SEARCH_INVALID",
+        ) from exc
     return {
         "provider": page.get("검색 제공자") or "Google Places API (New)",
         "status": "candidates" if page.get("후보") else "no_matches",
@@ -923,7 +974,10 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
             try:
                 packet = self.server.requery(section, conditions)
             except ReviewSearchError as exc:
-                self._send_json({"error": exc.code, "message": str(exc)}, exc.status)
+                payload = {"error": exc.code, "message": str(exc), "retryable": exc.retryable}
+                if exc.fallback:
+                    payload["fallback"] = exc.fallback
+                self._send_json(payload, exc.status)
                 return
             except Exception:
                 # Provider adapters already sanitize expected errors.  Never

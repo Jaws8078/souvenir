@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +26,18 @@ PROTOCOL = "2025-03-26"
 MAX_RESPONSE = 5 * 1024 * 1024
 DEFAULT_LIMIT = 50
 DEFAULT_MAX_PAGES = 100
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 0.75
+RETRYABLE_ERROR_MARKERS = (
+    "NETWORK_ERROR",
+    "TIMEOUT",
+    "HTTP_ERROR",
+    "RPC_ERROR",
+    "SEARCH_ERROR",
+    "MISSING_RESPONSE",
+    "INVALID_RESPONSE",
+    "RATE_LIMITED",
+)
 
 
 class HotelError(ValueError):
@@ -145,6 +159,34 @@ class PilotHotelClient:
         result = self.rpc("tools/call", {"name": name, "arguments": arguments})
         return _tool_text(result)
 
+    @staticmethod
+    def _retry_settings():
+        try:
+            attempts = int(os.environ.get("SOUVENIR_PILOT_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS))
+        except (TypeError, ValueError):
+            attempts = DEFAULT_RETRY_ATTEMPTS
+        try:
+            backoff = float(os.environ.get("SOUVENIR_PILOT_RETRY_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS))
+        except (TypeError, ValueError):
+            backoff = DEFAULT_RETRY_BACKOFF_SECONDS
+        return max(1, min(attempts, 5)), max(0.0, min(backoff, 10.0))
+
+    @staticmethod
+    def _retryable(error):
+        code = str(error).upper()
+        return any(marker in code for marker in RETRYABLE_ERROR_MARKERS)
+
+    def _call_tool_with_retry(self, name, arguments):
+        attempts, backoff = self._retry_settings()
+        for attempt in range(attempts):
+            try:
+                return self._call_tool(name, arguments)
+            except HotelError as exc:
+                if attempt + 1 >= attempts or not self._retryable(exc):
+                    raise
+                time.sleep(backoff * (2 ** attempt))
+        raise HotelError("PILOT_HOTEL_SEARCH_ERROR")
+
     def search(self, arguments, max_pages=DEFAULT_MAX_PAGES):
         """Search all reachable pages, even when ``has_more`` is false.
 
@@ -177,7 +219,7 @@ class PilotHotelClient:
             seen_offsets.add(offset)
             page_args = dict(arguments)
             page_args["offset"] = offset
-            data = self._call_tool("search_hotels", page_args)
+            data = self._call_tool_with_retry("search_hotels", page_args)
             page_rows = data.get("hotels")
             if not isinstance(page_rows, list):
                 raise HotelError("PILOT_HOTEL_INVALID_RESPONSE")
@@ -212,7 +254,7 @@ class PilotHotelClient:
         """Read details for one opaque Pilot hotel id."""
         tools = self._handshake()
         self._find_tool(tools, "get_hotel_details")
-        return self._call_tool("get_hotel_details", {"hotel_id": hotel_id})
+        return self._call_tool_with_retry("get_hotel_details", {"hotel_id": hotel_id})
 
     def get_room_rates_for_hotel(self, hotel_id, check_in=None, check_out=None, guests=None):
         """Read room offers for a hotel; never reserves or modifies anything."""
@@ -222,7 +264,7 @@ class PilotHotelClient:
         for key, value in (("check_in", check_in), ("check_out", check_out), ("guests", guests)):
             if value is not None:
                 arguments[key] = value
-        return self._call_tool("get_room_rates_for_hotel", arguments)
+        return self._call_tool_with_retry("get_room_rates_for_hotel", arguments)
 
 
 def _date(value, code):
