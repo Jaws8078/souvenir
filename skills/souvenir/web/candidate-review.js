@@ -16,6 +16,7 @@
     searching: false,
     refreshing: false,
     sessionExpired: false,
+    hostOnly: false,
     selected: new Set(),
     expanded: new Set(),
   };
@@ -192,27 +193,28 @@
     return `souvenir-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
-  async function persistHostResult(section, conditions, result, signal) {
-    const response = await fetch("/api/host-result", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ section: section.key, conditions, result }),
-      signal,
-    });
-    let payload;
-    try {
-      payload = await response.json();
-    } catch (error) {
-      const parseError = new Error("호스트 검색 결과를 읽지 못했어요.");
-      parseError.code = "HOST_SEARCH_RESULT_INVALID";
-      throw parseError;
+  function hostResultPayload(section, source) {
+    if (!source || typeof source !== "object" || !source.sections || typeof source.sections !== "object") {
+      const error = new Error("호스트 검색 도구가 공개 후보 패킷을 반환하지 않았어요.");
+      error.code = "HOST_SEARCH_RESULT_INVALID";
+      throw error;
     }
-    if (!response.ok) {
-      const hostError = new Error(payload.message || "호스트 검색 결과를 반영하지 못했어요.");
-      hostError.code = payload.error || "HOST_SEARCH_RESULT_INVALID";
-      throw hostError;
-    }
-    return payload;
+    const results = {
+      ...(state.packet || {}),
+      ...source,
+      sections: {
+        ...((state.packet && state.packet.sections) || {}),
+        ...source.sections,
+      },
+    };
+    return {
+      status: "results_updated",
+      section: section.key,
+      results,
+      selection_reset: true,
+      same_site: true,
+      source: "host_bridge",
+    };
   }
 
   async function callHostSearchTool(section, conditions, signal) {
@@ -222,7 +224,7 @@
       request_id: hostRequestId(),
       section: section.key,
       conditions,
-      return_contract: "source_packet",
+      return_contract: "public_packet",
     }), signal);
     const source = extractHostResult(result);
     if (!source) {
@@ -230,7 +232,7 @@
       error.code = "HOST_SEARCH_RESULT_INVALID";
       throw error;
     }
-    return persistHostResult(section, conditions, source, signal);
+    return hostResultPayload(section, source);
   }
 
   async function waitForFollowUpResult(section, conditions, requestId, signal) {
@@ -245,7 +247,7 @@
         const source = extractHostResult(output);
         const returnedId = output?.request_id || output?.structuredContent?.request_id;
         if (source && returnedId === requestId) {
-          return persistHostResult(section, conditions, source, signal);
+          return hostResultPayload(section, source);
         }
       }
       await withAbort(waitForRetry(350), signal);
@@ -265,8 +267,8 @@
       `section: ${section.key}`,
       `conditions: ${JSON.stringify(conditions)}`,
       "현재 대화에 연결된 검색 MCP 또는 허용된 웹 검색을 사용해 위 조건으로 다시 검색하세요.",
-      "검색이 끝나면 request_id와 section을 유지한 구조화된 후보 패킷을 반환하고, 후보 검토 화면을 갱신하세요.",
-      "결과 형식: {status:\"results_updated\", request_id, section, results:{provider, search, candidates, coverage}}",
+      "검색이 끝나면 request_id와 section을 유지하고, 공개 UI 패킷(public packet)을 tool output으로 반환하세요.",
+      "결과 형식: {status:\"results_updated\", request_id, section, results:{version, trip, sections, review_only:true}}",
     ].join("\n");
     await withAbort(runtime.sendFollowUpMessage({ prompt, scrollToBottom: false }), signal);
     return waitForFollowUpResult(section, conditions, requestId, signal);
@@ -406,6 +408,14 @@
         session: false,
       };
     }
+    if (isNetworkError(error) && state.hostOnly) {
+      return {
+        message: "GPT/Codex 호스트와 연결이 끊겼어요. 후보 검토 앱을 호스트에서 다시 열어주세요.",
+        status: "호스트 연결 끊김 · 다시 열기 필요",
+        session: false,
+        fallback: "host_bridge",
+      };
+    }
     if (isNetworkError(error)) {
       return {
         message: "검색 세션이 만료됐어요. 세션 새로고침을 눌러 현재 화면과 다시 연결해주세요.",
@@ -417,6 +427,14 @@
       return {
         message: "검색 에이전트 연결이 없어요. GPT/Codex 호스트에서 후보 검토 화면을 다시 열어주세요.",
         status: "검색 에이전트 연결 필요",
+        session: false,
+        fallback: "host_bridge",
+      };
+    }
+    if (error?.code === "HOST_INITIAL_PACKET_MISSING") {
+      return {
+        message: "GPT/Codex 호스트가 초기 후보 패킷을 전달하지 않았어요. 후보 검토 앱을 검색 결과에서 다시 열어주세요.",
+        status: "호스트 후보 패킷 필요",
         session: false,
         fallback: "host_bridge",
       };
@@ -499,8 +517,9 @@
     setSessionRefreshVisible(true);
   }
 
-  function resetResultState(packet) {
+  function resetResultState(packet, options = {}) {
     state.packet = packet;
+    if (Object.prototype.hasOwnProperty.call(options, "hostOnly")) state.hostOnly = options.hostOnly === true;
     state.activeSection = activePacketSections()[0]?.key || "";
     state.conditionSection = "";
     state.selected.clear();
@@ -533,7 +552,7 @@
       if (!response.ok) throw new Error("후보 결과를 다시 불러오지 못했어요.");
       const packet = await response.json();
       if (!packet || !packet.sections) throw new Error("후보 결과 형식이 올바르지 않아요.");
-      resetResultState(packet);
+      resetResultState(packet, { hostOnly: false });
       render();
       elements.status.textContent = "세션 새로고침 완료 · 후보 검토";
       elements.editorStatus.textContent = "세션을 새로 확인했어요. 조건을 다시 검색할 수 있어요.";
@@ -840,6 +859,24 @@
     elements.modalConfirm.disabled = true;
     elements.submitResult.textContent = "제출 내용을 기록하는 중…";
     try {
+      if (state.hostOnly) {
+        const runtime = hostRuntime();
+        if (!runtime || typeof runtime.sendFollowUpMessage !== "function") {
+          const unavailable = new Error("선택 제출을 받을 GPT/Codex 호스트가 없어요.");
+          unavailable.code = "HOST_BRIDGE_UNAVAILABLE";
+          throw unavailable;
+        }
+        const prompt = [
+          "[Souvenir 후보 선택 제출]",
+          `selected: ${JSON.stringify(selected)}`,
+          "선택한 후보를 저장 전 검토 상태로 기록하세요. 예약·결제·Notion 저장은 하지 마세요.",
+        ].join("\n");
+        await runtime.sendFollowUpMessage({ prompt, scrollToBottom: false });
+        elements.submitResult.textContent = `${selected.length}개 후보를 GPT/Codex 호스트에 전달했어요.`;
+        elements.status.textContent = "선택 제출 완료 · 호스트 검토 대기";
+        elements.modalConfirm.textContent = "전달 완료";
+        return;
+      }
       const response = await fetch("/api/selection", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selected }) });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "제출에 실패했어요.");
@@ -879,9 +916,23 @@
   async function boot() {
     bind();
     try {
+      const runtime = hostRuntime();
+      const hostPacket = extractHostResult(runtime?.toolOutput || runtime?.initialToolOutput);
+      if (hostPacket?.sections) {
+        resetResultState(hostPacket, { hostOnly: true });
+        render();
+        elements.status.textContent = "GPT/Codex 호스트 후보 검토";
+        setSessionRefreshVisible(false);
+        return;
+      }
+      if (runtime && (typeof runtime.callTool === "function" || typeof runtime.sendFollowUpMessage === "function")) {
+        const missing = new Error("GPT/Codex 호스트가 초기 후보 패킷을 전달하지 않았어요.");
+        missing.code = "HOST_INITIAL_PACKET_MISSING";
+        throw missing;
+      }
       const response = await fetch("/api/results", { cache: "no-store" });
       if (!response.ok) throw new Error("결과를 불러오지 못했어요.");
-      resetResultState(await response.json());
+      resetResultState(await response.json(), { hostOnly: false });
       render();
       elements.status.textContent = "읽기 전용 후보 검토";
       setSessionRefreshVisible(false);

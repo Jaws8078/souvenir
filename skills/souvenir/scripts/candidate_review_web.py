@@ -522,48 +522,6 @@ def normalize_packet(raw: Any, explicit_kind: Optional[str] = None) -> Dict[str,
     }
 
 
-class ReviewSearchError(ValueError):
-    """A safe, user-facing error raised while refreshing one result tab."""
-
-    def __init__(self, message: str, code: str = "SEARCH_FAILED", status: int = 422,
-                 *, retryable: bool = False, fallback: Optional[str] = None):
-        super().__init__(message)
-        self.code = code
-        self.status = status
-        self.retryable = retryable
-        self.fallback = fallback
-
-
-def _section_from_source(source: Mapping[str, Any], section: str) -> Mapping[str, Any]:
-    """Find one provider-shaped section without exposing it to the browser."""
-    container = _first(source, "sections", "results", "결과", "파트")
-    if isinstance(container, Mapping):
-        for key, value in container.items():
-            if _canonical_section(key) == section and isinstance(value, Mapping):
-                return value
-    if any(key in source for key in ("candidates", "후보", "items", "results")):
-        return source
-    return {}
-
-
-def _replace_source_section(source: Mapping[str, Any], section: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """Return a copied source packet with one section replaced."""
-    updated = copy.deepcopy(dict(source))
-    container_key = next((key for key in ("sections", "results", "결과", "파트") if isinstance(updated.get(key), Mapping)), None)
-    if container_key:
-        container = dict(updated[container_key])
-        existing_key = next((key for key in container if _canonical_section(key) == section), section)
-        container[existing_key] = copy.deepcopy(dict(payload))
-        updated[container_key] = container
-        return updated
-    # A single-part input has no sections wrapper; preserve its trip metadata
-    # while replacing the provider result at the top level.
-    for key in ("candidates", "후보", "items", "results", "provider", "status", "search", "검색", "coverage", "검색 범위"):
-        updated.pop(key, None)
-    updated.update(copy.deepcopy(dict(payload)))
-    return updated
-
-
 def _selection_records(packet: Mapping[str, Any], selected: Sequence[Any]) -> List[Dict[str, str]]:
     index: Dict[Tuple[str, str], Mapping[str, Any]] = {}
     for section, payload in (packet.get("sections") or {}).items():
@@ -618,80 +576,13 @@ class CandidateReviewHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, address: Tuple[str, int], packet: Dict[str, Any], output_path: Optional[Path] = None,
-                 source_packet: Optional[Mapping[str, Any]] = None):
+    def __init__(self, address: Tuple[str, int], packet: Dict[str, Any], output_path: Optional[Path] = None):
         super().__init__(address, CandidateReviewHandler)
         self.packet = packet
-        self.source_packet = copy.deepcopy(dict(source_packet or packet))
         self.output_path = output_path
         self.selection: List[Dict[str, str]] = []
         self.selection_payload: Optional[Dict[str, Any]] = None
         self.state_lock = threading.Lock()
-        self.search_lock = threading.Lock()
-
-    def accept_host_result(
-        self,
-        section: str,
-        result: Mapping[str, Any],
-        conditions: Optional[Mapping[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Accept one normalized/source-shaped result returned by a host agent.
-
-        The browser widget can call a host MCP tool (or ask the current agent
-        to search) and post the resulting provider packet back here.  Keeping
-        this merge on the local server means a browser refresh still sees the
-        latest candidates and the existing selection/reset semantics remain in
-        one place.
-        """
-        canonical = _canonical_section(section)
-        if not canonical or not isinstance(result, Mapping):
-            raise ReviewSearchError("호스트 검색 결과 형식이 올바르지 않아요.", "HOST_SEARCH_RESULT_INVALID")
-        if not self.search_lock.acquire(blocking=False):
-            raise ReviewSearchError("이미 다른 검색을 진행하고 있어요. 잠시 후 다시 시도해주세요.", "SEARCH_IN_PROGRESS", 409)
-        try:
-            payload: Mapping[str, Any] = result
-            # Accept the common tool envelope without exposing the envelope to
-            # the public packet contract.
-            for key in ("source", "results", "result", "packet"):
-                nested = payload.get(key)
-                if isinstance(nested, Mapping) and (
-                    "sections" in nested
-                    or any(name in nested for name in ("candidates", "후보", "items", "results"))
-                ):
-                    payload = nested
-                    break
-
-            if isinstance(payload.get("sections"), Mapping):
-                source_section = _section_from_source(payload, canonical)
-                if not source_section:
-                    raise ReviewSearchError("호스트 검색 결과에 해당 파트가 없어요.", "HOST_SEARCH_RESULT_INVALID")
-            else:
-                source_section = payload
-
-            merged_section = copy.deepcopy(dict(source_section))
-            if conditions and isinstance(conditions, Mapping):
-                if not isinstance(_first(merged_section, "search", "검색", "검색 설정"), Mapping):
-                    merged_section["search"] = _public_mapping(conditions)
-                if canonical == "hotels":
-                    if "budget_per_night_krw" not in merged_section and "budget_per_night_krw" in conditions:
-                        merged_section["budget_per_night_krw"] = conditions.get("budget_per_night_krw")
-                    if "room_filters" not in merged_section and "room_filters" in conditions:
-                        merged_section["room_filters"] = _public_mapping(conditions.get("room_filters"))
-
-            updated_source = _replace_source_section(self.source_packet, canonical, merged_section)
-            updated_packet = normalize_packet(updated_source)
-            with self.state_lock:
-                self.source_packet = updated_source
-                self.packet = updated_packet
-                self.selection = []
-                self.selection_payload = None
-            return updated_packet
-        except ReviewSearchError:
-            raise
-        except (TypeError, ValueError, KeyError) as exc:
-            raise ReviewSearchError("호스트 검색 결과 형식이 올바르지 않아요.", "HOST_SEARCH_RESULT_INVALID") from exc
-        finally:
-            self.search_lock.release()
 
     def submit_selection(self, selected: Sequence[Any]) -> Dict[str, Any]:
         with self.state_lock:
@@ -749,8 +640,7 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
                 "search_enabled": True,
                 "host_bridge": {
                     "tool": "souvenir_search_candidates",
-                    "result_endpoint": "/api/host-result",
-                    "result_contract": "source_packet",
+                    "result_contract": "public_packet",
                 },
             })
             return
@@ -779,7 +669,7 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib signature
         path = urllib.parse.urlsplit(self.path).path
-        if path not in {"/api/selection", "/api/host-result"}:
+        if path != "/api/selection":
             self._send_json({"error": "NOT_FOUND"}, 404)
             return
         try:
@@ -797,29 +687,6 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
         if not isinstance(body, Mapping):
             self._send_json({"error": "INVALID_JSON_OBJECT"}, 400)
             return
-        if path == "/api/host-result":
-            section = _canonical_section(body.get("section"))
-            conditions = body.get("conditions")
-            result = body.get("result")
-            if result is None:
-                result = body.get("results") or body.get("source") or body.get("packet")
-            if not section or not isinstance(result, Mapping):
-                self._send_json({"error": "HOST_RESULT_INVALID", "message": "호스트 검색 결과 형식을 확인해주세요."}, 400)
-                return
-            try:
-                packet = self.server.accept_host_result(section, result, conditions if isinstance(conditions, Mapping) else None)
-            except ReviewSearchError as exc:
-                self._send_json({"error": exc.code, "message": str(exc)}, exc.status)
-                return
-            self._send_json({
-                "status": "results_updated",
-                "section": section,
-                "results": packet,
-                "selection_reset": True,
-                "same_site": True,
-                "source": "host_bridge",
-            })
-            return
         selected = body.get("selected")
         if not isinstance(selected, list):
             self._send_json({"error": "SELECTED_LIST_REQUIRED"}, 400)
@@ -836,8 +703,8 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
 
 
 def build_server(packet: Dict[str, Any], host: str = "127.0.0.1", port: int = 0,
-                 output_path: Optional[Path] = None, source_packet: Optional[Mapping[str, Any]] = None) -> CandidateReviewHTTPServer:
-    return CandidateReviewHTTPServer((host, port), packet, output_path=output_path, source_packet=source_packet)
+                 output_path: Optional[Path] = None) -> CandidateReviewHTTPServer:
+    return CandidateReviewHTTPServer((host, port), packet, output_path=output_path)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -855,7 +722,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         packet = normalize_packet(raw, explicit_kind=options.kind)
         if not (0 <= options.port <= 65535):
             raise ValueError("포트는 0~65535 범위여야 합니다.")
-        server = build_server(packet, host=options.host, port=options.port, output_path=options.output, source_packet=raw)
+        server = build_server(packet, host=options.host, port=options.port, output_path=options.output)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "error", "error": str(exc), "review_only": True}, ensure_ascii=False), file=sys.stderr)
         return 2

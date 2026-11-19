@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import threading
+import urllib.error
 import unittest
 import urllib.request
 from pathlib import Path
@@ -72,8 +73,10 @@ class CandidateReviewTests(unittest.TestCase):
         self.assertIn("기존 결과 유지", javascript)
         self.assertNotIn('error.message || "결과를 불러오지 못했어요."', javascript)
         self.assertNotIn('fetch("/api/search"', javascript)
+        self.assertNotIn('fetch("/api/host-result"', javascript)
         self.assertIn("souvenir_search_candidates", javascript)
-        self.assertIn('fetch("/api/host-result"', javascript)
+        self.assertIn('return_contract: "public_packet"', javascript)
+        self.assertIn("hostOnly", javascript)
         self.assertIn("sendFollowUpMessage", javascript)
 
     def test_normalize_combined_packet_has_three_sections_and_public_context(self):
@@ -134,57 +137,6 @@ class CandidateReviewTests(unittest.TestCase):
         self.assertEqual(candidate["price_label"], "90,000원")
         self.assertEqual(candidate["id"], "host-hotel-1")
 
-    def test_host_result_updates_same_server_without_provider_call(self):
-        result = review.normalize_packet(packet())
-        server = review.build_server(result, port=0, source_packet=packet())
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            base = f"http://127.0.0.1:{server.server_address[1]}"
-            body = json.dumps({
-                "section": "hotels",
-                "conditions": {
-                    "location": "난바",
-                    "check_in": "2026-12-20",
-                    "check_out": "2026-12-23",
-                    "guests": 2,
-                    "budget_per_night_krw": 100000,
-                    "room_filters": {"bed_type": "트윈", "refundable_only": True},
-                },
-                "result": {
-                    "provider": "host-agent",
-                    "search": {"location": "난바", "check_in": "2026-12-20", "check_out": "2026-12-23"},
-                    "candidates": [{
-                        "id": "host-hotel-1",
-                        "title": "호스트 에이전트 호텔",
-                        "subtitle": "난바역",
-                        "location": "난바역",
-                        "price": 95000,
-                        "currency": "KRW",
-                        "price_label": "95,000원",
-                        "price_note": "재확인 필요",
-                        "metadata": ["트윈"],
-                        "tags": ["후보 검토"],
-                        "url": "https://example.com/host-hotel",
-                        "score": 4.1,
-                        "verification": "review",
-                        "details": {},
-                    }],
-                },
-            }).encode("utf-8")
-            request = urllib.request.Request(base + "/api/host-result", data=body, headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(request, timeout=3) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(payload["source"], "host_bridge")
-            self.assertEqual(payload["results"]["sections"]["hotels"]["candidates"][0]["title"], "호스트 에이전트 호텔")
-            with urllib.request.urlopen(base + "/api/results", timeout=3) as response:
-                current = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(current["sections"]["hotels"]["candidates"][0]["title"], "호스트 에이전트 호텔")
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
     def test_http_server_serves_ui_and_records_selection(self):
         result = review.normalize_packet(packet())
         with tempfile.TemporaryDirectory() as directory:
@@ -200,6 +152,13 @@ class CandidateReviewTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/api/results", timeout=2) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(payload["sections"]["places"]["candidate_count"], 1)
+                with urllib.request.urlopen(base + "/api/health", timeout=2) as response:
+                    health = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(health["host_bridge"]["result_contract"], "public_packet")
+                    self.assertNotIn("result_endpoint", health["host_bridge"])
+                with self.assertRaises(urllib.error.HTTPError) as missing_endpoint:
+                    urllib.request.urlopen(base + "/api/host-result", timeout=2)
+                self.assertEqual(missing_endpoint.exception.code, 404)
                 body = json.dumps({"selected": [{"section": "places", "id": "place-place-1-1"}]}).encode("utf-8")
                 request = urllib.request.Request(base + "/api/selection", data=body, headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(request, timeout=2) as response:
