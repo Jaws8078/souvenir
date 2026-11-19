@@ -14,6 +14,8 @@ python3 skills/souvenir/scripts/run_souvenir.py candidate-review \
 
 첫 줄의 `web_url`을 호스트의 브라우저 미리보기로 열면 된다. `--open`은 사용자가 명시적으로 로컬 브라우저를 열고 싶을 때만 사용한다. 기본 포트는 0이라 사용 가능한 포트를 고르고, 외부 주소에 바인딩하지 않는다.
 
+Codex/ChatGPT에서 MCP Apps 화면을 사용하려면 로컬 미리보기 URL을 열지 않는다. 플러그인의 `mcp.json`이 실행하는 `souvenir_mcp_app.py`가 `souvenir_render_candidate_review` 도구와 `ui://souvenir/candidate-review-v1.html` 리소스를 등록하고, 도구 결과가 후보 보드를 대화 안에 렌더링한다. 이 호스트 경로는 별도의 후보 검토 HTTP 서버를 요구하지 않는다.
+
 ## 입력 계약
 
 한 파트의 기존 결과를 그대로 넘길 수 있다. `candidates`가 있는 Kiwi 결과는 `flights`, Pilot 결과는 `hotels`로 추론하며, 장소 결과는 `--kind places`를 붙인다.
