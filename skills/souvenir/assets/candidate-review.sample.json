@@ -9,7 +9,7 @@
   "sections": {
     "flights": {
       "provider": "kiwi-mcp · 예시",
-      "search": {"flyFrom": "ICN", "flyTo": "KIX", "adults": 2},
+      "search": {"flyFrom": "ICN", "flyTo": "KIX", "departureDate": "19/12/2026", "returnDate": "23/12/2026", "adults": 2, "price_to": 600000},
       "candidates": [
         {"itinerary": {"id": "f1", "airline": "예시 항공", "price": 412000, "currency": "KRW", "outbound": {"from": "ICN", "to": "KIX", "departureTime": "2026-12-19T18:10:00", "arrivalTime": "2026-12-19T20:00:00"}, "inbound": {"from": "KIX", "to": "ICN", "departureTime": "2026-12-23T12:40:00", "arrivalTime": "2026-12-23T14:35:00"}, "bookingUrl": "https://www.kiwi.com/"}, "verification": "needs_check"},
         {"itinerary": {"id": "f2", "airline": "예시 항공 2", "price": 498000, "currency": "KRW", "outbound": {"from": "ICN", "to": "KIX", "departureTime": "2026-12-19T19:30:00", "arrivalTime": "2026-12-19T21:20:00"}, "inbound": {"from": "KIX", "to": "ICN", "departureTime": "2026-12-23T13:10:00", "arrivalTime": "2026-12-23T15:00:00"}, "bookingUrl": "https://www.kiwi.com/"}, "verification": "needs_check"}
@@ -17,6 +17,7 @@
     },
     "hotels": {
       "provider": "pilot-mcp · 예시",
+      "search": {"location": "난바", "check_in": "2026-12-19", "check_out": "2026-12-23", "guests": 2, "rooms": 1},
       "budget_per_night_krw": 100000,
       "room_filters": {"bed_type": "트윈", "refundable_only": true},
       "candidates": [
@@ -26,6 +27,7 @@
     },
     "places": {
       "provider": "Google Places API (New) · 예시",
+      "search": {"destination": "오사카", "query": "오사카 여행지", "rank_preference": "RELEVANCE"},
       "candidates": [
         {"place_id": "p1", "name": "도톤보리 강변 산책", "formattedAddress": "오사카 난바", "primaryTypeDisplayName": "관광 명소", "rating": 4.6, "googleMapsUri": "https://maps.google.com/?q=dotonbori"},
         {"place_id": "p2", "name": "나카노시마 미술관", "formattedAddress": "오사카 기타", "primaryTypeDisplayName": "미술관", "rating": 4.4, "googleMapsUri": "https://maps.google.com/?q=nakanoshima"}

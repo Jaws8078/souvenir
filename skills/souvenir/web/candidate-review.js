@@ -9,6 +9,10 @@
     sort: "recommended",
     verifiedOnly: false,
     refundableOnly: false,
+    conditionSection: "",
+    searching: false,
+    refreshing: false,
+    sessionExpired: false,
     selected: new Set(),
     expanded: new Set(),
   };
@@ -38,6 +42,45 @@
     selectedList: $("selected-list"),
     submitResult: $("submit-result"),
     status: $("review-status"),
+    sessionRefresh: $("session-refresh"),
+    conditionFields: $("condition-editor-fields"),
+    rerunSearch: $("rerun-search"),
+    editorStatus: $("editor-status"),
+    emptyTitle: $("empty-title"),
+    emptyCopy: $("empty-copy"),
+  };
+
+  const defaultEmptyState = {
+    title: "조건에 맞는 후보가 없어요.",
+    copy: "검색어·금액 필터를 조금 느슨하게 하거나 다른 탭을 확인해보세요.",
+    action: "필터 초기화",
+  };
+
+  const conditionDefinitions = {
+    flights: [
+      { key: "flyFrom", label: "출발 공항", type: "text", placeholder: "ICN", required: true },
+      { key: "flyTo", label: "도착 공항", type: "text", placeholder: "KIX", required: true },
+      { key: "departureDate", label: "가는 날", type: "date", required: true },
+      { key: "returnDate", label: "오는 날", type: "date" },
+      { key: "adults", label: "성인", type: "number", min: 1, step: 1 },
+      { key: "price_to", label: "총액 상한", type: "number", min: 0, step: 1000, suffix: "원" },
+    ],
+    hotels: [
+      { key: "location", label: "지역·역", type: "text", placeholder: "난바", required: true, full: true },
+      { key: "check_in", label: "체크인", type: "date", required: true },
+      { key: "check_out", label: "체크아웃", type: "date", required: true },
+      { key: "guests", label: "투숙 인원", type: "number", min: 1, step: 1 },
+      { key: "budget_per_night_krw", label: "1박 상한", type: "number", min: 0, step: 1000, suffix: "원" },
+      { key: "bed_type", label: "침대", type: "text", placeholder: "트윈" },
+      { key: "refundable_only", label: "취소 가능 객실", type: "checkbox", full: true },
+    ],
+    places: [
+      { key: "destination", label: "여행지", type: "text", placeholder: "오사카", required: true },
+      { key: "query", label: "검색어", type: "text", placeholder: "조용한 카페", required: true, full: true },
+      { key: "included_type", label: "장소 유형", type: "text", placeholder: "cafe" },
+      { key: "rank_preference", label: "정렬", type: "select", options: [["RELEVANCE", "추천순"], ["DISTANCE", "거리순"]] },
+      { key: "open_now", label: "지금 영업 중", type: "checkbox", full: true },
+    ],
   };
 
   function text(value, fallback) {
@@ -65,6 +108,222 @@
 
   function sectionByKey(key) {
     return (state.packet.sections || {})[key] || null;
+  }
+
+  function inputDate(value) {
+    const raw = text(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+    const match = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
+  }
+
+  function conditionValue(section, definition) {
+    const search = section.search || {};
+    if (definition.key === "budget_per_night_krw") return section.budget_per_night_krw ?? "";
+    if (definition.key === "bed_type") return section.room_filters?.bed_type || "";
+    if (definition.key === "refundable_only") return section.room_filters?.refundable_only === true;
+    if (definition.key === "destination") return search.destination || state.packet.trip?.destination || "";
+    let value = search[definition.key];
+    if (!value && ["departureDate", "check_in"].includes(definition.key)) value = state.packet.trip?.start_date || state.packet.trip?.start;
+    if (!value && ["returnDate", "check_out"].includes(definition.key)) value = state.packet.trip?.end_date || state.packet.trip?.end;
+    if (definition.type === "date") return inputDate(value);
+    return value ?? "";
+  }
+
+  function makeConditionField(section, definition) {
+    const wrapper = document.createElement("div");
+    wrapper.className = `editor-field${definition.full ? " full" : ""}${definition.type === "checkbox" ? " checkbox" : ""}`;
+    const inputId = `condition-${section.key}-${definition.key}`;
+    const label = document.createElement("label");
+    label.htmlFor = inputId;
+    label.textContent = definition.label;
+    const value = conditionValue(section, definition);
+    let input;
+    if (definition.type === "select") {
+      input = document.createElement("select");
+      (definition.options || []).forEach(([optionValue, optionLabel]) => {
+        const option = document.createElement("option");
+        option.value = optionValue;
+        option.textContent = optionLabel;
+        input.appendChild(option);
+      });
+      input.value = value || definition.options?.[0]?.[0] || "";
+    } else {
+      input = document.createElement("input");
+      input.type = definition.type;
+      if (definition.placeholder) input.placeholder = definition.placeholder;
+      if (definition.min !== undefined) input.min = String(definition.min);
+      if (definition.step !== undefined) input.step = String(definition.step);
+      if (definition.required) input.required = true;
+      if (definition.type === "checkbox") input.checked = Boolean(value);
+      else input.value = text(value);
+    }
+    input.id = inputId;
+    input.dataset.conditionKey = definition.key;
+    input.dataset.conditionType = definition.type;
+    if (definition.type === "checkbox") {
+      wrapper.append(input, label);
+    } else {
+      wrapper.append(label, input);
+      if (definition.suffix) {
+        const suffix = document.createElement("span");
+        suffix.className = "editor-suffix";
+        suffix.textContent = definition.suffix;
+        wrapper.appendChild(suffix);
+      }
+    }
+    return wrapper;
+  }
+
+  function renderConditionEditor(section) {
+    elements.conditionFields.replaceChildren();
+    const definitions = conditionDefinitions[section.key] || [];
+    definitions.forEach((definition) => elements.conditionFields.appendChild(makeConditionField(section, definition)));
+    state.conditionSection = section.key;
+    elements.editorStatus.textContent = "";
+    elements.editorStatus.classList.remove("is-error");
+  }
+
+  function collectConditions() {
+    const conditions = {};
+    elements.conditionFields.querySelectorAll("[data-condition-key]").forEach((input) => {
+      const key = input.dataset.conditionKey;
+      const type = input.dataset.conditionType;
+      if (type === "checkbox") {
+        conditions[key] = input.checked;
+        return;
+      }
+      if (type === "number") {
+        conditions[key] = input.value === "" ? null : Number(input.value);
+        return;
+      }
+      conditions[key] = input.value.trim();
+    });
+    if (state.activeSection === "hotels") {
+      conditions.room_filters = {
+        bed_type: conditions.bed_type || "",
+        refundable_only: Boolean(conditions.refundable_only),
+      };
+      delete conditions.bed_type;
+      delete conditions.refundable_only;
+    }
+    return conditions;
+  }
+
+  function setSearchBusy(busy) {
+    state.searching = busy;
+    elements.rerunSearch.disabled = busy;
+    elements.rerunSearch.classList.toggle("is-loading", busy);
+    elements.rerunSearch.textContent = busy ? "검색 중…" : "다시 검색";
+  }
+
+  function isNetworkError(error) {
+    const message = text(error?.message).toLowerCase();
+    return error?.name === "TypeError" || /load failed|failed to fetch|networkerror|network request failed/.test(message);
+  }
+
+  function friendlyError(error, fallback) {
+    if (error?.name === "AbortError") {
+      return {
+        message: "검색 시간이 길어지고 있어요. 조건을 줄여 다시 시도해주세요.",
+        status: "검색 지연 · 다시 시도 필요",
+        session: false,
+      };
+    }
+    if (isNetworkError(error)) {
+      return {
+        message: "검색 세션이 만료됐어요. 세션 새로고침을 눌러 현재 화면과 다시 연결해주세요.",
+        status: "검색 세션 만료 · 새로고침 필요",
+        session: true,
+      };
+    }
+    return {
+      message: error?.message || fallback,
+      status: "검색 확인 필요",
+      session: false,
+    };
+  }
+
+  function setSessionRefreshVisible(visible) {
+    state.sessionExpired = visible;
+    elements.sessionRefresh.hidden = !visible;
+  }
+
+  function setEmptyState({ title, copy, action, sessionError = false }) {
+    elements.emptyTitle.textContent = title;
+    elements.emptyCopy.textContent = copy;
+    elements.emptyReset.textContent = action;
+    elements.emptyReset.dataset.action = sessionError ? "refresh" : "reset";
+    elements.empty.classList.toggle("is-session-error", sessionError);
+  }
+
+  function restoreDefaultEmptyState() {
+    setEmptyState({ ...defaultEmptyState });
+  }
+
+  function showSessionError(message, status) {
+    elements.title.textContent = "검색 세션이 만료됐어요.";
+    elements.label.textContent = "SESSION EXPIRED";
+    elements.count.textContent = "";
+    elements.chips.replaceChildren();
+    elements.grid.replaceChildren();
+    setEmptyState({
+      title: "검색을 다시 시작해주세요.",
+      copy: message || "세션 새로고침을 누르고, 연결이 되지 않으면 검색 서버를 다시 켠 뒤 이 탭을 새로고침해주세요.",
+      action: "세션 새로고침",
+      sessionError: true,
+    });
+    elements.empty.hidden = false;
+    elements.status.textContent = status || "검색 세션 만료 · 새로고침 필요";
+    setSessionRefreshVisible(true);
+  }
+
+  function resetResultState(packet) {
+    state.packet = packet;
+    state.activeSection = activePacketSections()[0]?.key || "";
+    state.conditionSection = "";
+    state.selected.clear();
+    state.expanded.clear();
+    state.query = "";
+    state.maxPrice = "";
+    state.sort = "recommended";
+    state.verifiedOnly = false;
+    state.refundableOnly = false;
+    elements.search.value = "";
+    elements.price.value = "";
+    elements.sort.value = "recommended";
+    elements.verified.checked = false;
+    elements.refundable.checked = false;
+    restoreDefaultEmptyState();
+    setSessionRefreshVisible(false);
+    setTripSummary();
+  }
+
+  async function refreshSession() {
+    if (state.refreshing) return;
+    state.refreshing = true;
+    elements.sessionRefresh.disabled = true;
+    elements.sessionRefresh.textContent = "연결 중…";
+    elements.status.textContent = "검색 세션 확인 중…";
+    try {
+      const health = await fetch("/api/health", { cache: "no-store" });
+      if (!health.ok) throw new Error("세션 상태를 확인하지 못했어요.");
+      const response = await fetch("/api/results", { cache: "no-store" });
+      if (!response.ok) throw new Error("후보 결과를 다시 불러오지 못했어요.");
+      const packet = await response.json();
+      if (!packet || !packet.sections) throw new Error("후보 결과 형식이 올바르지 않아요.");
+      resetResultState(packet);
+      render();
+      elements.status.textContent = "세션 새로고침 완료 · 후보 검토";
+      elements.editorStatus.textContent = "세션을 새로 확인했어요. 조건을 다시 검색할 수 있어요.";
+    } catch (error) {
+      const notice = friendlyError(error, "세션을 새로고침하지 못했어요. 검색 서버가 켜져 있는지 확인해주세요.");
+      showSessionError(notice.session ? notice.message : "세션을 새로고침하지 못했어요. 검색 서버를 다시 켠 뒤 다시 눌러주세요.", notice.status);
+    } finally {
+      state.refreshing = false;
+      elements.sessionRefresh.disabled = false;
+      elements.sessionRefresh.textContent = "세션 새로고침";
+    }
   }
 
   function selectedCandidates() {
@@ -96,6 +355,7 @@
       button.innerHTML = `<span aria-hidden="true">${escapeText(section.icon || "•")}</span><span>${escapeText(section.label)}</span><span class="tab-count">${section.candidate_count || 0}</span>`;
       button.addEventListener("click", () => {
         state.activeSection = section.key;
+        state.conditionSection = "";
         state.query = "";
         state.maxPrice = "";
         state.verifiedOnly = false;
@@ -265,6 +525,7 @@
   function renderCards(section, visible) {
     elements.grid.replaceChildren();
     visible.forEach((candidate, index) => elements.grid.appendChild(makeCard(candidate, index, section)));
+    restoreDefaultEmptyState();
     elements.empty.hidden = visible.length !== 0;
   }
 
@@ -294,6 +555,7 @@
     if (!section) return;
     state.activeSection = section.key;
     renderTabs();
+    if (state.conditionSection !== section.key) renderConditionEditor(section);
     const visible = visibleCandidates();
     elements.label.textContent = `${section.label} · ${section.provider || "검색 결과"}`;
     elements.title.textContent = `${section.label} 후보를 확인하세요`;
@@ -324,6 +586,45 @@
     elements.submit.focus();
   }
 
+  async function rerunSearch() {
+    if (!state.packet || !state.activeSection || state.searching) return;
+    const section = sectionByKey(state.activeSection);
+    if (!section || !section.searchable) return;
+    setSearchBusy(true);
+    elements.editorStatus.classList.remove("is-error");
+    elements.editorStatus.textContent = "같은 화면에서 검색 결과를 갱신하는 중…";
+    elements.status.textContent = `${section.label} 재검색 중…`;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 120000);
+    try {
+      const response = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ section: section.key, conditions: collectConditions() }),
+        signal: controller.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        const providerError = new Error(payload.message || "검색을 완료하지 못했어요.");
+        providerError.code = payload.error;
+        throw providerError;
+      }
+      resetResultState(payload.results);
+      render();
+      elements.editorStatus.textContent = "검색 결과를 갱신했어요. 이전 선택은 새 결과에 맞춰 초기화됐어요.";
+      elements.status.textContent = "검색 완료 · 같은 화면에서 결과 갱신";
+    } catch (error) {
+      const notice = friendlyError(error, "검색을 완료하지 못했어요. 조건을 확인하고 다시 시도해주세요.");
+      elements.editorStatus.textContent = notice.message;
+      elements.editorStatus.classList.add("is-error");
+      elements.status.textContent = notice.session ? notice.status : "재검색 실패 · 기존 결과 유지";
+      setSessionRefreshVisible(notice.session);
+    } finally {
+      window.clearTimeout(timeout);
+      setSearchBusy(false);
+    }
+  }
+
   async function submitSelection() {
     const selected = selectedCandidates().map(({ section, candidate }) => ({ section: section.key, id: candidate.id }));
     elements.modalConfirm.disabled = true;
@@ -336,7 +637,8 @@
       elements.status.textContent = "선택 제출 완료 · 저장 전 검토";
       elements.modalConfirm.textContent = "제출 완료";
     } catch (error) {
-      elements.submitResult.textContent = error.message || "제출에 실패했어요.";
+      const notice = friendlyError(error, "제출에 실패했어요. 잠시 후 다시 시도해주세요.");
+      elements.submitResult.textContent = notice.session ? "저장 세션이 만료됐어요. 세션 새로고침 후 다시 제출해주세요." : notice.message;
       elements.submitResult.style.color = "#a85d4a";
     } finally {
       elements.modalConfirm.disabled = false;
@@ -350,7 +652,12 @@
     elements.verified.addEventListener("change", (event) => { state.verifiedOnly = event.target.checked; render(); });
     elements.refundable.addEventListener("change", (event) => { state.refundableOnly = event.target.checked; render(); });
     elements.reset.addEventListener("click", resetFilters);
-    elements.emptyReset.addEventListener("click", resetFilters);
+    elements.emptyReset.addEventListener("click", () => {
+      if (elements.emptyReset.dataset.action === "refresh") refreshSession();
+      else resetFilters();
+    });
+    elements.sessionRefresh.addEventListener("click", refreshSession);
+    elements.rerunSearch.addEventListener("click", rerunSearch);
     elements.submit.addEventListener("click", openModal);
     elements.modalClose.addEventListener("click", closeModal);
     elements.modalCancel.addEventListener("click", closeModal);
@@ -364,15 +671,13 @@
     try {
       const response = await fetch("/api/results", { cache: "no-store" });
       if (!response.ok) throw new Error("결과를 불러오지 못했어요.");
-      state.packet = await response.json();
-      state.activeSection = activePacketSections()[0]?.key || "";
-      setTripSummary();
+      resetResultState(await response.json());
       render();
       elements.status.textContent = "읽기 전용 후보 검토";
+      setSessionRefreshVisible(false);
     } catch (error) {
-      elements.title.textContent = error.message || "결과를 불러오지 못했어요.";
-      elements.empty.hidden = false;
-      elements.status.textContent = "후보 패킷 확인 필요";
+      const notice = friendlyError(error, "결과를 불러오지 못했어요. 세션 새로고침을 눌러 다시 연결해주세요.");
+      showSessionError(notice.session ? notice.message : "결과를 불러오지 못했어요. 세션 새로고침을 눌러 다시 연결해주세요.", notice.status);
     }
   }
 

@@ -17,6 +17,7 @@
         <div class="topbar-meta">
           <span class="status-dot" aria-hidden="true"></span>
           <span id="review-status">읽기 전용 후보 검토</span>
+          <button class="session-refresh" id="session-refresh" type="button" hidden>세션 새로고침</button>
         </div>
       </header>
 
@@ -59,6 +60,19 @@
                 </div>
                 <button class="text-button" id="reset-filters" type="button">초기화</button>
               </div>
+              <details class="search-editor" id="search-editor">
+                <summary>
+                  <span class="editor-kicker">SEARCH AGAIN</span>
+                  <strong>검색 조건 수정</strong>
+                  <span class="editor-plus" aria-hidden="true">＋</span>
+                </summary>
+                <p class="editor-intro">조건을 바꾸고 다시 검색하면 이 탭의 결과만 같은 화면에서 갱신돼요.</p>
+                <div class="condition-editor-fields" id="condition-editor-fields"></div>
+                <div class="editor-actions">
+                  <button class="primary-button editor-submit" id="rerun-search" type="button">다시 검색</button>
+                </div>
+                <p class="editor-status" id="editor-status" role="status"></p>
+              </details>
               <label class="field-label" for="candidate-search">후보 검색</label>
               <div class="search-field">
                 <span aria-hidden="true">⌕</span>
@@ -93,8 +107,8 @@
               <div class="candidate-grid" id="candidate-grid" aria-live="polite"></div>
               <div class="empty-state" id="empty-state" hidden>
                 <span class="empty-icon">✦</span>
-                <h3>조건에 맞는 후보가 없어요.</h3>
-                <p>검색어·금액 필터를 조금 느슨하게 하거나 다른 탭을 확인해보세요.</p>
+                <h3 id="empty-title">조건에 맞는 후보가 없어요.</h3>
+                <p id="empty-copy">검색어·금액 필터를 조금 느슨하게 하거나 다른 탭을 확인해보세요.</p>
                 <button class="secondary-button" id="empty-reset" type="button">필터 초기화</button>
               </div>
             </div>
