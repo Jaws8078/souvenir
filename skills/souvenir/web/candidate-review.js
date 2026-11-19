@@ -1,6 +1,9 @@
 (function () {
   "use strict";
 
+  const HOST_SEARCH_TOOL_DEFAULT = "souvenir_search_candidates";
+  const HOST_RESULT_TIMEOUT_MS = 118000;
+
   const state = {
     packet: null,
     activeSection: "",
@@ -94,6 +97,179 @@
     if (!raw) return null;
     const parsed = Number(raw.replace(/[^0-9.-]/g, ""));
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function hostRuntime() {
+    if (typeof window === "undefined") return null;
+    const runtime = window.openai;
+    return runtime && typeof runtime === "object" ? runtime : null;
+  }
+
+  function hostSearchToolName(section) {
+    const config = typeof window !== "undefined" && window.SOUVENIR_CONFIG && typeof window.SOUVENIR_CONFIG === "object"
+      ? window.SOUVENIR_CONFIG
+      : {};
+    const tools = config.searchTools && typeof config.searchTools === "object" ? config.searchTools : {};
+    return text(tools[section.key] || config.searchTool || HOST_SEARCH_TOOL_DEFAULT).trim();
+  }
+
+  function hostBridgeAvailable() {
+    const runtime = hostRuntime();
+    return Boolean(runtime && (typeof runtime.callTool === "function" || typeof runtime.sendFollowUpMessage === "function"));
+  }
+
+  function abortError() {
+    const error = new Error("검색이 취소됐어요.");
+    error.name = "AbortError";
+    return error;
+  }
+
+  function withAbort(promise, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
+      let settled = false;
+      const cleanup = () => signal?.removeEventListener("abort", onAbort);
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(abortError());
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(promise).then((value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+    });
+  }
+
+  function parseHostJson(value) {
+    if (typeof value !== "string") return value;
+    const raw = value.trim();
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function extractHostResult(value) {
+    if (!value) return null;
+    let current = value;
+    if (current && typeof current === "object" && current.structuredContent) current = current.structuredContent;
+    if (current && typeof current === "object" && current.data && typeof current.data === "object") current = current.data;
+    if (current && typeof current === "object" && Array.isArray(current.content)) {
+      const structured = current.content.find((item) => item && item.structuredContent);
+      if (structured?.structuredContent) current = structured.structuredContent;
+      else {
+        const textBlock = current.content.find((item) => item && item.type === "text" && typeof item.text === "string");
+        const parsed = parseHostJson(textBlock?.text);
+        if (parsed) current = parsed;
+      }
+    }
+    if (current && typeof current === "object") {
+      for (const key of ["results", "result", "source", "packet"]) {
+        const nested = current[key];
+        if (nested && typeof nested === "object" && (nested.sections || nested.candidates || nested.후보 || nested.items)) return nested;
+      }
+      if (current.sections || current.candidates || current.후보 || current.items) return current;
+    }
+    return null;
+  }
+
+  function hostRequestId() {
+    return `souvenir-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  async function persistHostResult(section, conditions, result, signal) {
+    const response = await fetch("/api/host-result", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ section: section.key, conditions, result }),
+      signal,
+    });
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      const parseError = new Error("호스트 검색 결과를 읽지 못했어요.");
+      parseError.code = "HOST_SEARCH_RESULT_INVALID";
+      throw parseError;
+    }
+    if (!response.ok) {
+      const hostError = new Error(payload.message || "호스트 검색 결과를 반영하지 못했어요.");
+      hostError.code = payload.error || "HOST_SEARCH_RESULT_INVALID";
+      throw hostError;
+    }
+    return payload;
+  }
+
+  async function callHostSearchTool(section, conditions, signal) {
+    const runtime = hostRuntime();
+    if (!runtime || typeof runtime.callTool !== "function") return null;
+    const result = await withAbort(runtime.callTool(hostSearchToolName(section), {
+      request_id: hostRequestId(),
+      section: section.key,
+      conditions,
+      return_contract: "source_packet",
+    }), signal);
+    const source = extractHostResult(result);
+    if (!source) {
+      const error = new Error("호스트 검색 도구가 후보 패킷을 반환하지 않았어요.");
+      error.code = "HOST_SEARCH_RESULT_INVALID";
+      throw error;
+    }
+    return persistHostResult(section, conditions, source, signal);
+  }
+
+  async function waitForFollowUpResult(section, conditions, requestId, signal) {
+    const runtime = hostRuntime();
+    const initial = JSON.stringify(runtime?.toolOutput || null);
+    const deadline = Date.now() + HOST_RESULT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw abortError();
+      const output = runtime?.toolOutput;
+      const serialized = JSON.stringify(output || null);
+      if (serialized && serialized !== initial) {
+        const source = extractHostResult(output);
+        const returnedId = output?.request_id || output?.structuredContent?.request_id;
+        if (source && returnedId === requestId) {
+          return persistHostResult(section, conditions, source, signal);
+        }
+      }
+      await withAbort(waitForRetry(350), signal);
+    }
+    const timeout = new Error("호스트 검색 결과를 기다리는 중 시간이 초과됐어요.");
+    timeout.code = "HOST_SEARCH_TIMEOUT";
+    throw timeout;
+  }
+
+  async function askHostAgentToSearch(section, conditions, signal) {
+    const runtime = hostRuntime();
+    if (!runtime || typeof runtime.sendFollowUpMessage !== "function") return null;
+    const requestId = hostRequestId();
+    const prompt = [
+      "[Souvenir 후보 보드 재검색 요청]",
+      `request_id: ${requestId}`,
+      `section: ${section.key}`,
+      `conditions: ${JSON.stringify(conditions)}`,
+      "현재 대화에 연결된 검색 MCP 또는 허용된 웹 검색을 사용해 위 조건으로 다시 검색하세요.",
+      "검색이 끝나면 request_id와 section을 유지한 구조화된 후보 패킷을 반환하고, 후보 검토 화면을 갱신하세요.",
+      "결과 형식: {status:\"results_updated\", request_id, section, results:{provider, search, candidates, coverage}}",
+    ].join("\n");
+    await withAbort(runtime.sendFollowUpMessage({ prompt, scrollToBottom: false }), signal);
+    return waitForFollowUpResult(section, conditions, requestId, signal);
   }
 
   function escapeText(value) {
@@ -253,7 +429,7 @@
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
   }
 
-  async function requestSearch(section, conditions, signal) {
+  async function requestDirectSearch(section, conditions, signal) {
     let attempt = 0;
     while (true) {
       const response = await fetch("/api/search", {
@@ -281,6 +457,44 @@
       elements.status.textContent = `${section.label} 검색 재시도 중… (${attempt + 1}/2)`;
       await waitForRetry(2500);
     }
+  }
+
+  async function requestSearch(section, conditions, signal) {
+    if (!hostBridgeAvailable()) return requestDirectSearch(section, conditions, signal);
+
+    const runtime = hostRuntime();
+    let hostError = null;
+    try {
+      elements.editorStatus.classList.remove("is-error");
+      elements.editorStatus.textContent = `${section.label} 조건을 현재 검색 에이전트에 전달하는 중…`;
+      elements.status.textContent = `${section.label} 에이전트 검색 중…`;
+      if (typeof runtime?.callTool === "function") {
+        try {
+          const directToolResult = await callHostSearchTool(section, conditions, signal);
+          if (directToolResult) return directToolResult;
+        } catch (error) {
+          hostError = error;
+        }
+      }
+      if (typeof runtime?.sendFollowUpMessage === "function") {
+        try {
+          const followUpResult = await askHostAgentToSearch(section, conditions, signal);
+          if (followUpResult) return followUpResult;
+        } catch (error) {
+          hostError = error;
+        }
+      }
+      if (hostError) throw hostError;
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      // A plain local preview can expose the ChatGPT bridge shim without
+      // exposing this plugin's search tool.  Keep the existing direct MCP
+      // path as a transparent fallback instead of leaving the board stuck.
+      elements.editorStatus.classList.remove("is-error");
+      elements.editorStatus.textContent = "호스트 검색 연결을 확인하지 못해 기본 검색으로 이어가고 있어요…";
+      elements.status.textContent = `${section.label} 기본 검색으로 전환 중…`;
+    }
+    return requestDirectSearch(section, conditions, signal);
   }
 
   function setSessionRefreshVisible(visible) {

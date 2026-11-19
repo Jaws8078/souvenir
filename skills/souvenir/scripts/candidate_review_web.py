@@ -360,6 +360,29 @@ def _generic_candidate(section: str, candidate: Mapping[str, Any], index: int) -
 def normalize_candidate(section: str, candidate: Any, index: int) -> Dict[str, Any]:
     if not isinstance(candidate, Mapping):
         candidate = {"title": _text(candidate)}
+    # Host-side MCP/App bridges may already return the public candidate shape
+    # used by this board.  Preserve it instead of interpreting the card as a
+    # provider-shaped hotel/flight/place record a second time.
+    if (
+        candidate.get("title")
+        and "price_label" in candidate
+        and isinstance(candidate.get("metadata", []), list)
+        and isinstance(candidate.get("tags", []), list)
+    ):
+        public = copy.deepcopy(dict(candidate))
+        public["section"] = section
+        public.setdefault("id", _slug_id(section, public.get("title"), index))
+        public.setdefault("subtitle", "상세 정보 확인 필요")
+        public.setdefault("location", public.get("subtitle", ""))
+        public.setdefault("price", None)
+        public.setdefault("currency", "")
+        public.setdefault("price_note", "조건 확인 필요")
+        public.setdefault("url", "")
+        public.setdefault("score", None)
+        public.setdefault("verification", "review")
+        public.setdefault("image_url", "")
+        public.setdefault("details", {})
+        return public
     if section == "flights":
         return _flight_candidate(candidate, index)
     if section == "hotels":
@@ -870,6 +893,70 @@ class CandidateReviewHTTPServer(ThreadingHTTPServer):
         finally:
             self.search_lock.release()
 
+    def accept_host_result(
+        self,
+        section: str,
+        result: Mapping[str, Any],
+        conditions: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Accept one normalized/source-shaped result returned by a host agent.
+
+        The browser widget can call a host MCP tool (or ask the current agent
+        to search) and post the resulting provider packet back here.  Keeping
+        this merge on the local server means a browser refresh still sees the
+        latest candidates and the existing selection/reset semantics remain in
+        one place.
+        """
+        canonical = _canonical_section(section)
+        if not canonical or not isinstance(result, Mapping):
+            raise ReviewSearchError("호스트 검색 결과 형식이 올바르지 않아요.", "HOST_SEARCH_RESULT_INVALID")
+        if not self.search_lock.acquire(blocking=False):
+            raise ReviewSearchError("이미 다른 검색을 진행하고 있어요. 잠시 후 다시 시도해주세요.", "SEARCH_IN_PROGRESS", 409)
+        try:
+            payload: Mapping[str, Any] = result
+            # Accept the common tool envelope without exposing the envelope to
+            # the public packet contract.
+            for key in ("source", "results", "result", "packet"):
+                nested = payload.get(key)
+                if isinstance(nested, Mapping) and (
+                    "sections" in nested
+                    or any(name in nested for name in ("candidates", "후보", "items", "results"))
+                ):
+                    payload = nested
+                    break
+
+            if isinstance(payload.get("sections"), Mapping):
+                source_section = _section_from_source(payload, canonical)
+                if not source_section:
+                    raise ReviewSearchError("호스트 검색 결과에 해당 파트가 없어요.", "HOST_SEARCH_RESULT_INVALID")
+            else:
+                source_section = payload
+
+            merged_section = copy.deepcopy(dict(source_section))
+            if conditions and isinstance(conditions, Mapping):
+                if not isinstance(_first(merged_section, "search", "검색", "검색 설정"), Mapping):
+                    merged_section["search"] = _public_mapping(conditions)
+                if canonical == "hotels":
+                    if "budget_per_night_krw" not in merged_section and "budget_per_night_krw" in conditions:
+                        merged_section["budget_per_night_krw"] = conditions.get("budget_per_night_krw")
+                    if "room_filters" not in merged_section and "room_filters" in conditions:
+                        merged_section["room_filters"] = _public_mapping(conditions.get("room_filters"))
+
+            updated_source = _replace_source_section(self.source_packet, canonical, merged_section)
+            updated_packet = normalize_packet(updated_source)
+            with self.state_lock:
+                self.source_packet = updated_source
+                self.packet = updated_packet
+                self.selection = []
+                self.selection_payload = None
+            return updated_packet
+        except ReviewSearchError:
+            raise
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ReviewSearchError("호스트 검색 결과 형식이 올바르지 않아요.", "HOST_SEARCH_RESULT_INVALID") from exc
+        finally:
+            self.search_lock.release()
+
     def submit_selection(self, selected: Sequence[Any]) -> Dict[str, Any]:
         with self.state_lock:
             records = _selection_records(self.packet, selected)
@@ -920,7 +1007,16 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
             self._serve_asset("candidate-review.html", "text/html; charset=utf-8")
             return
         if path == "/api/health":
-            self._send_json({"status": "READY", "review_only": True, "search_enabled": True})
+            self._send_json({
+                "status": "READY",
+                "review_only": True,
+                "search_enabled": True,
+                "host_bridge": {
+                    "tool": "souvenir_search_candidates",
+                    "result_endpoint": "/api/host-result",
+                    "result_contract": "source_packet",
+                },
+            })
             return
         if path == "/api/results":
             packet = dict(self.server.packet)
@@ -947,7 +1043,7 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib signature
         path = urllib.parse.urlsplit(self.path).path
-        if path not in {"/api/selection", "/api/search"}:
+        if path not in {"/api/selection", "/api/search", "/api/host-result"}:
             self._send_json({"error": "NOT_FOUND"}, 404)
             return
         try:
@@ -964,6 +1060,29 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
             return
         if not isinstance(body, Mapping):
             self._send_json({"error": "INVALID_JSON_OBJECT"}, 400)
+            return
+        if path == "/api/host-result":
+            section = _canonical_section(body.get("section"))
+            conditions = body.get("conditions")
+            result = body.get("result")
+            if result is None:
+                result = body.get("results") or body.get("source") or body.get("packet")
+            if not section or not isinstance(result, Mapping):
+                self._send_json({"error": "HOST_RESULT_INVALID", "message": "호스트 검색 결과 형식을 확인해주세요."}, 400)
+                return
+            try:
+                packet = self.server.accept_host_result(section, result, conditions if isinstance(conditions, Mapping) else None)
+            except ReviewSearchError as exc:
+                self._send_json({"error": exc.code, "message": str(exc)}, exc.status)
+                return
+            self._send_json({
+                "status": "results_updated",
+                "section": section,
+                "results": packet,
+                "selection_reset": True,
+                "same_site": True,
+                "source": "host_bridge",
+            })
             return
         if path == "/api/search":
             section = _canonical_section(body.get("section"))
