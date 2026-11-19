@@ -5,10 +5,8 @@ import sys
 import tempfile
 import threading
 import unittest
-import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "candidate_review_web.py"
@@ -70,9 +68,10 @@ class CandidateReviewTests(unittest.TestCase):
         self.assertIn('id="empty-title"', html)
         self.assertIn("검색 세션이 만료됐어요.", javascript)
         self.assertIn('fetch("/api/health"', javascript)
-        self.assertIn("검색 공급자가 응답하지 않아 자동으로 다시 시도하고 있어요", javascript)
-        self.assertIn("기존 결과를 유지했어요", javascript)
+        self.assertIn("검색 에이전트 연결이 없어요.", javascript)
+        self.assertIn("기존 결과 유지", javascript)
         self.assertNotIn('error.message || "결과를 불러오지 못했어요."', javascript)
+        self.assertNotIn('fetch("/api/search"', javascript)
         self.assertIn("souvenir_search_candidates", javascript)
         self.assertIn('fetch("/api/host-result"', javascript)
         self.assertIn("sendFollowUpMessage", javascript)
@@ -109,60 +108,6 @@ class CandidateReviewTests(unittest.TestCase):
             self.assertFalse(saved["notion_written"])
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["selections"][0]["title"], "난바 호텔")
 
-    def test_flight_requery_replaces_one_section_without_rebuilding_packet(self):
-        provider_result = {
-            "currency": "KRW",
-            "passengers": {"adults": 2, "children": 0, "infants": 0},
-            "itineraries": [{
-                "id": "new-flight",
-                "price": 280000,
-                "outbound": {"from": "GMP", "to": "KIX", "departureTime": "2026-12-20T18:00:00", "arrivalTime": "2026-12-20T20:00:00", "stops": 0},
-                "inbound": {"from": "KIX", "to": "GMP", "departureTime": "2026-12-23T12:00:00", "arrivalTime": "2026-12-23T14:00:00", "stops": 0},
-                "bookingUrl": "https://www.kiwi.com/new-flight",
-            }],
-        }
-        fake_client = Mock()
-        fake_client.search.return_value = provider_result
-        with patch.object(review, "KiwiClient", return_value=fake_client):
-            updated_source = review.requery_source_packet(packet(), "flights", {
-                "flyFrom": "GMP",
-                "flyTo": "KIX",
-                "departureDate": "2026-12-20",
-                "returnDate": "2026-12-23",
-                "adults": 2,
-                "price_to": 500000,
-            })
-        self.assertEqual(updated_source["sections"]["flights"]["search"]["flyFrom"], "GMP")
-        self.assertEqual(updated_source["sections"]["hotels"]["candidates"][0]["hotel"]["name"], "난바 호텔")
-        refreshed = review.normalize_packet(updated_source)
-        self.assertEqual(refreshed["sections"]["flights"]["candidates"][0]["title"], "GMP → KIX")
-        self.assertEqual(refreshed["sections"]["places"]["candidate_count"], 1)
-
-    def test_hotel_requery_reapplies_budget_and_room_filters(self):
-        source = {
-            "trip": {"destination": "오사카"},
-            "sections": {"hotels": {"provider": "pilot-mcp", "candidates": []}},
-        }
-        provider_result = {"hotels": [{"id": "hotel-new", "name": "새 난바 호텔", "address": "난바", "price": 360000, "currency": "KRW"}], "pages": []}
-        fake_client = Mock()
-        fake_client.search.return_value = provider_result
-        fake_client.get_room_rates_for_hotel.return_value = {
-            "offers": [{"roomName": "Twin Room", "refundable": True, "price": 360000, "currency": "KRW"}],
-        }
-        with patch.object(review, "PilotHotelClient", return_value=fake_client):
-            updated_source = review.requery_source_packet(source, "hotels", {
-                "location": "난바",
-                "check_in": "2026-12-19",
-                "check_out": "2026-12-23",
-                "guests": 2,
-                "rooms": 1,
-                "budget_per_night_krw": 100000,
-                "room_filters": {"bed_type": "트윈", "refundable_only": True},
-            })
-        hotel = updated_source["sections"]["hotels"]["candidates"][0]
-        self.assertEqual(hotel["hotel"]["name"], "새 난바 호텔")
-        self.assertEqual(hotel["room_rate_verification"]["matching_offers"][0]["roomName"], "Twin Room")
-
     def test_normalize_packet_preserves_host_public_candidate_shape(self):
         raw = {
             "provider": "host-web-search",
@@ -188,98 +133,6 @@ class CandidateReviewTests(unittest.TestCase):
         self.assertEqual(candidate["title"], "호스트 검색 호텔")
         self.assertEqual(candidate["price_label"], "90,000원")
         self.assertEqual(candidate["id"], "host-hotel-1")
-
-    def test_hotel_provider_error_is_translated_before_http_response(self):
-        source = {
-            "trip": {"destination": "오사카"},
-            "sections": {"hotels": {"provider": "pilot-mcp", "candidates": []}},
-        }
-        fake_client = Mock()
-        fake_client.search.side_effect = review.HotelError("PILOT_HOTEL_SEARCH_ERROR")
-        with patch.object(review, "PilotHotelClient", return_value=fake_client):
-            with self.assertRaises(review.ReviewSearchError) as raised:
-                review.requery_source_packet(source, "hotels", {
-                    "location": "난바",
-                    "check_in": "2026-12-19",
-                    "check_out": "2026-12-23",
-                    "guests": 2,
-                    "rooms": 1,
-                    "budget_per_night_krw": 100000,
-                    "room_filters": {"bed_type": "트윈", "refundable_only": True},
-                })
-        self.assertEqual(raised.exception.code, "HOTEL_SEARCH_PROVIDER")
-        self.assertIn("숙소 검색 공급자 응답", str(raised.exception))
-        self.assertNotIn("PILOT_HOTEL_SEARCH_ERROR", str(raised.exception))
-        self.assertTrue(raised.exception.retryable)
-        self.assertEqual(raised.exception.fallback, "host_web_search")
-
-    def test_http_search_updates_results_on_same_server(self):
-        provider_result = {
-            "currency": "KRW",
-            "passengers": {"adults": 2, "children": 0, "infants": 0},
-            "itineraries": [{
-                "id": "same-tab-flight",
-                "price": 290000,
-                "outbound": {"from": "GMP", "to": "KIX", "departureTime": "2026-12-20T18:00:00", "arrivalTime": "2026-12-20T20:00:00", "stops": 0},
-                "inbound": {"from": "KIX", "to": "GMP", "departureTime": "2026-12-23T12:00:00", "arrivalTime": "2026-12-23T14:00:00", "stops": 0},
-                "bookingUrl": "https://www.kiwi.com/same-tab-flight",
-            }],
-        }
-        fake_client = Mock()
-        fake_client.search.return_value = provider_result
-        result = review.normalize_packet(packet())
-        server = review.build_server(result, port=0, source_packet=packet())
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            base = f"http://127.0.0.1:{server.server_address[1]}"
-            body = json.dumps({"section": "flights", "conditions": {
-                "flyFrom": "GMP", "flyTo": "KIX", "departureDate": "2026-12-20", "returnDate": "2026-12-23", "adults": 2,
-            }}).encode("utf-8")
-            request = urllib.request.Request(base + "/api/search", data=body, headers={"Content-Type": "application/json"}, method="POST")
-            with patch.object(review, "KiwiClient", return_value=fake_client):
-                with urllib.request.urlopen(request, timeout=3) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(payload["status"], "results_updated")
-            self.assertTrue(payload["same_site"])
-            self.assertTrue(payload["selection_reset"])
-            self.assertEqual(payload["results"]["sections"]["flights"]["candidates"][0]["location"], "GMP → KIX")
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
-    def test_http_hotel_error_returns_safe_retry_and_fallback_metadata(self):
-        result = review.normalize_packet(packet())
-        server = review.build_server(result, port=0, source_packet=packet())
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        fake_client = Mock()
-        fake_client.search.side_effect = review.HotelError("PILOT_HOTEL_SEARCH_ERROR")
-        try:
-            base = f"http://127.0.0.1:{server.server_address[1]}"
-            body = json.dumps({"section": "hotels", "conditions": {
-                "location": "난바",
-                "check_in": "2026-12-19",
-                "check_out": "2026-12-23",
-                "guests": 2,
-                "rooms": 1,
-                "budget_per_night_krw": 100000,
-                "room_filters": {"bed_type": "트윈", "refundable_only": True},
-            }}).encode("utf-8")
-            request = urllib.request.Request(base + "/api/search", data=body, headers={"Content-Type": "application/json"}, method="POST")
-            with patch.object(review, "PilotHotelClient", return_value=fake_client):
-                with self.assertRaises(urllib.error.HTTPError) as raised:
-                    urllib.request.urlopen(request, timeout=3)
-            payload = json.loads(raised.exception.read().decode("utf-8"))
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-        self.assertEqual(raised.exception.code, 502)
-        self.assertTrue(payload["retryable"])
-        self.assertEqual(payload["fallback"], "host_web_search")
-        self.assertNotIn("PILOT_HOTEL_SEARCH_ERROR", payload["message"])
 
     def test_host_result_updates_same_server_without_provider_call(self):
         result = review.normalize_packet(packet())

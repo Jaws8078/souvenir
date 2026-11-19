@@ -413,6 +413,22 @@
         session: true,
       };
     }
+    if (error?.code === "HOST_BRIDGE_UNAVAILABLE") {
+      return {
+        message: "검색 에이전트 연결이 없어요. GPT/Codex 호스트에서 후보 검토 화면을 다시 열어주세요.",
+        status: "검색 에이전트 연결 필요",
+        session: false,
+        fallback: "host_bridge",
+      };
+    }
+    if (error?.code === "HOST_SEARCH_TIMEOUT") {
+      return {
+        message: "검색 에이전트가 아직 결과를 반환하지 않았어요. 현재 결과는 유지했어요.",
+        status: "에이전트 검색 지연 · 결과 유지",
+        session: false,
+        fallback: "host_bridge",
+      };
+    }
     return {
       message: error?.message || fallback,
       status: "검색 확인 필요",
@@ -421,80 +437,32 @@
     };
   }
 
-  function retryableSearchError(error) {
-    return error?.retryable === true || error?.code === "SEARCH_FAILED";
-  }
-
   function waitForRetry(milliseconds) {
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
   }
 
-  async function requestDirectSearch(section, conditions, signal) {
-    let attempt = 0;
-    while (true) {
-      const response = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ section: section.key, conditions }),
-        signal,
-      });
-      let payload;
-      try {
-        payload = await response.json();
-      } catch (error) {
-        error.retryable = false;
-        throw error;
-      }
-      if (response.ok) return payload;
-      const providerError = new Error(payload.message || "검색을 완료하지 못했어요.");
-      providerError.code = payload.error;
-      providerError.retryable = payload.retryable === true;
-      providerError.fallback = payload.fallback || "";
-      if (!retryableSearchError(providerError) || attempt >= 1) throw providerError;
-      attempt += 1;
-      elements.editorStatus.classList.remove("is-error");
-      elements.editorStatus.textContent = `${section.label} 검색 공급자가 응답하지 않아 자동으로 다시 시도하고 있어요…`;
-      elements.status.textContent = `${section.label} 검색 재시도 중… (${attempt + 1}/2)`;
-      await waitForRetry(2500);
-    }
-  }
-
   async function requestSearch(section, conditions, signal) {
-    if (!hostBridgeAvailable()) return requestDirectSearch(section, conditions, signal);
+    if (!hostBridgeAvailable()) {
+      const unavailable = new Error("검색 에이전트 연결이 없어요.");
+      unavailable.code = "HOST_BRIDGE_UNAVAILABLE";
+      throw unavailable;
+    }
 
     const runtime = hostRuntime();
-    let hostError = null;
-    try {
-      elements.editorStatus.classList.remove("is-error");
-      elements.editorStatus.textContent = `${section.label} 조건을 현재 검색 에이전트에 전달하는 중…`;
-      elements.status.textContent = `${section.label} 에이전트 검색 중…`;
-      if (typeof runtime?.callTool === "function") {
-        try {
-          const directToolResult = await callHostSearchTool(section, conditions, signal);
-          if (directToolResult) return directToolResult;
-        } catch (error) {
-          hostError = error;
-        }
-      }
-      if (typeof runtime?.sendFollowUpMessage === "function") {
-        try {
-          const followUpResult = await askHostAgentToSearch(section, conditions, signal);
-          if (followUpResult) return followUpResult;
-        } catch (error) {
-          hostError = error;
-        }
-      }
-      if (hostError) throw hostError;
-    } catch (error) {
-      if (error?.name === "AbortError") throw error;
-      // A plain local preview can expose the ChatGPT bridge shim without
-      // exposing this plugin's search tool.  Keep the existing direct MCP
-      // path as a transparent fallback instead of leaving the board stuck.
-      elements.editorStatus.classList.remove("is-error");
-      elements.editorStatus.textContent = "호스트 검색 연결을 확인하지 못해 기본 검색으로 이어가고 있어요…";
-      elements.status.textContent = `${section.label} 기본 검색으로 전환 중…`;
+    elements.editorStatus.classList.remove("is-error");
+    elements.editorStatus.textContent = `${section.label} 조건을 현재 검색 에이전트에 전달하는 중…`;
+    elements.status.textContent = `${section.label} 에이전트 검색 중…`;
+    if (typeof runtime?.callTool === "function") {
+      const directToolResult = await callHostSearchTool(section, conditions, signal);
+      if (directToolResult) return directToolResult;
     }
-    return requestDirectSearch(section, conditions, signal);
+    if (typeof runtime?.sendFollowUpMessage === "function") {
+      const followUpResult = await askHostAgentToSearch(section, conditions, signal);
+      if (followUpResult) return followUpResult;
+    }
+    const unavailable = new Error("검색 에이전트 도구가 연결되지 않았어요.");
+    unavailable.code = "HOST_BRIDGE_UNAVAILABLE";
+    throw unavailable;
   }
 
   function setSessionRefreshVisible(visible) {
@@ -857,13 +825,9 @@
       elements.status.textContent = "검색 완료 · 같은 화면에서 결과 갱신";
     } catch (error) {
       const notice = friendlyError(error, "검색을 완료하지 못했어요. 조건을 확인하고 다시 시도해주세요.");
-      elements.editorStatus.textContent = notice.fallback === "host_web_search"
-        ? "숙소 공급자가 계속 응답하지 않아 기존 결과를 유지했어요. 잠시 후 다시 검색해주세요."
-        : notice.message;
+      elements.editorStatus.textContent = notice.message;
       elements.editorStatus.classList.add("is-error");
-      elements.status.textContent = notice.session
-        ? notice.status
-        : (notice.fallback === "host_web_search" ? "숙소 공급자 지연 · 기존 결과 유지" : "재검색 실패 · 기존 결과 유지");
+      elements.status.textContent = notice.session ? notice.status : `${notice.status} · 기존 결과 유지`;
       setSessionRefreshVisible(notice.session);
     } finally {
       window.clearTimeout(timeout);

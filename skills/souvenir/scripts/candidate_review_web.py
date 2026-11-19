@@ -32,22 +32,6 @@ WEB_DIR = SCRIPT_DIR.parent / "web"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from kiwi_flights import (  # noqa: E402
-    FlightError,
-    KiwiClient,
-    normalize as normalize_flights,
-    validate_input as validate_flight_input,
-)
-from pilot_hotels import (  # noqa: E402
-    HotelError,
-    PilotHotelClient,
-    apply_room_filters,
-    normalize as normalize_hotels,
-    validate_input as validate_hotel_input,
-)
-from trip_engine import GooglePlacesError, prepare_google_place_candidate_page  # noqa: E402
-
-
 MAX_BODY_BYTES = 1024 * 1024
 PACKET_VERSION = 1
 
@@ -550,19 +534,6 @@ class ReviewSearchError(ValueError):
         self.fallback = fallback
 
 
-def _safe_provider_error_message(section: str, code: Any) -> str:
-    """Translate provider codes into useful Korean without leaking internals."""
-    normalized = _text(getattr(code, "error_code", code)).upper()
-    label = SECTION_DEFS.get(section, {}).get("label", "검색")
-    if normalized.startswith("INPUT_"):
-        return f"{label} 검색 조건을 확인해주세요."
-    if any(token in normalized for token in ("AUTH", "ACCESS_DENIED", "SESSION", "EXPIRED")):
-        return f"{label} 검색 연결이 만료됐어요. 세션 새로고침 후 다시 시도해주세요."
-    if any(token in normalized for token in ("NETWORK", "TIMEOUT", "HTTP", "RPC", "SEARCH_ERROR", "UNAVAILABLE")):
-        return f"{label} 검색 공급자 응답을 받지 못했어요. 잠시 후 다시 시도해주세요."
-    return f"{label} 검색을 완료하지 못했어요. 잠시 후 다시 시도해주세요."
-
-
 def _section_from_source(source: Mapping[str, Any], section: str) -> Mapping[str, Any]:
     """Find one provider-shaped section without exposing it to the browser."""
     container = _first(source, "sections", "results", "결과", "파트")
@@ -591,224 +562,6 @@ def _replace_source_section(source: Mapping[str, Any], section: str, payload: Ma
         updated.pop(key, None)
     updated.update(copy.deepcopy(dict(payload)))
     return updated
-
-
-def _condition_value(conditions: Mapping[str, Any], key: str, default: Any = None) -> Any:
-    value = conditions.get(key, default)
-    if value is None:
-        return default
-    if isinstance(value, str):
-        return value.strip()
-    return value
-
-
-def _date_for_kiwi(value: Any, key: str, *, required: bool = False) -> str:
-    rendered = _text(value)
-    if not rendered:
-        if required:
-            raise ReviewSearchError(f"{key}를 입력해주세요.", "INPUT_INVALID_DATE")
-        return ""
-    for pattern, output in (("%Y-%m-%d", "%d/%m/%Y"), ("%d/%m/%Y", "%d/%m/%Y")):
-        try:
-            return dt.datetime.strptime(rendered, pattern).strftime(output)
-        except ValueError:
-            continue
-    raise ReviewSearchError(f"{key} 형식이 올바르지 않습니다.", "INPUT_INVALID_DATE")
-
-
-def _merge_allowed(source: Mapping[str, Any], conditions: Mapping[str, Any], allowed: Sequence[str]) -> Dict[str, Any]:
-    if not isinstance(conditions, Mapping):
-        raise ReviewSearchError("검색 조건 형식이 올바르지 않습니다.", "INPUT_INVALID_CONDITIONS")
-    unknown = set(conditions) - set(allowed)
-    if unknown:
-        raise ReviewSearchError("지원하지 않는 검색 조건이 포함되어 있습니다.", "INPUT_UNSUPPORTED_FILTER")
-    merged = dict(source)
-    for key in allowed:
-        if key not in conditions:
-            continue
-        value = conditions[key]
-        if value in (None, ""):
-            merged.pop(key, None)
-        else:
-            merged[key] = value
-    return merged
-
-
-def _search_flights(source_section: Mapping[str, Any], conditions: Mapping[str, Any]) -> Dict[str, Any]:
-    source_search = _first(source_section, "search", "검색")
-    source_search = dict(source_search) if isinstance(source_search, Mapping) else {}
-    allowed = (
-        "flyFrom", "flyTo", "departureDate", "returnDate", "adults", "children", "infants",
-        "cabinClass", "currency", "locale", "price_to", "dtime_from", "dtime_to",
-        "ret_dtime_from", "ret_dtime_to", "max_sector_stopovers", "sort",
-        "allow_self_transfer", "allow_overnight_stopovers", "allow_diff_airport_connection",
-    )
-    source_search = {key: value for key, value in source_search.items() if key in allowed}
-    merged = _merge_allowed(source_search, conditions, allowed)
-    if "flyFrom" in conditions:
-        merged["flyFrom"] = _condition_value(conditions, "flyFrom")
-    if "flyTo" in conditions:
-        merged["flyTo"] = _condition_value(conditions, "flyTo")
-    merged["departureDate"] = _date_for_kiwi(_condition_value(conditions, "departureDate", merged.get("departureDate")), "가는 날짜", required=True)
-    if "returnDate" in conditions or merged.get("returnDate"):
-        return_value = _condition_value(conditions, "returnDate", merged.get("returnDate"))
-        if return_value:
-            merged["returnDate"] = _date_for_kiwi(return_value, "오는 날짜")
-        else:
-            merged.pop("returnDate", None)
-    merged["flyFrom"] = _text(merged.get("flyFrom"))
-    merged["flyTo"] = _text(merged.get("flyTo"))
-    if not merged["flyFrom"] or not merged["flyTo"]:
-        raise ReviewSearchError("출발·도착 공항을 모두 입력해주세요.", "INPUT_MISSING_LOCATION")
-    payload = {"search": merged}
-    if source_section.get("minimum_checked_bag_kg") not in (None, ""):
-        payload["minimum_checked_bag_kg"] = source_section["minimum_checked_bag_kg"]
-    try:
-        args, checked_bag_kg = validate_flight_input(payload)
-        raw = KiwiClient().search(args)
-        return normalize_flights(raw, args, checked_bag_kg)
-    except ReviewSearchError:
-        raise
-    except FlightError as exc:
-        raise ReviewSearchError(
-            _safe_provider_error_message("flights", exc),
-            "FLIGHT_SEARCH_PROVIDER",
-            502,
-        ) from exc
-    except (ValueError, TypeError) as exc:
-        raise ReviewSearchError(
-            _safe_provider_error_message("flights", "INPUT_INVALID"),
-            "FLIGHT_SEARCH_INVALID",
-        ) from exc
-
-
-def _search_hotels(source_section: Mapping[str, Any], conditions: Mapping[str, Any]) -> Dict[str, Any]:
-    source_search = _first(source_section, "search", "검색")
-    source_search = dict(source_search) if isinstance(source_search, Mapping) else {}
-    allowed = (
-        "location", "check_in", "check_out", "guests", "rooms", "children_ages", "currency",
-        "guest_nationality", "limit", "offset", "radius_meters", "min_star_rating",
-        "min_guest_rating", "amenity_ids", "property_type_ids", "ai_search",
-    )
-    source_search = {key: value for key, value in source_search.items() if key in allowed}
-    provider_conditions = {key: value for key, value in conditions.items() if key not in {"budget_per_night_krw", "room_filters"}}
-    merged = _merge_allowed(source_search, provider_conditions, allowed)
-    for required_key, label in (("location", "숙소 지역"), ("check_in", "체크인"), ("check_out", "체크아웃")):
-        value = _text(merged.get(required_key))
-        if not value:
-            raise ReviewSearchError(f"{label}을 입력해주세요.", "INPUT_MISSING_HOTEL_FIELD")
-        merged[required_key] = value
-    merged["offset"] = 0
-    budget = conditions.get("budget_per_night_krw", source_section.get("budget_per_night_krw"))
-    if budget in ("", None):
-        budget = None
-    room_filters = conditions.get("room_filters", source_section.get("room_filters", {}))
-    if room_filters is None:
-        room_filters = {}
-    payload = {
-        "search": merged,
-        "budget_per_night_krw": budget,
-        "max_pages": source_section.get("max_pages", 100),
-        "room_filters": room_filters,
-    }
-    try:
-        args, budget, nights, max_pages, validated_room_filters = validate_hotel_input(payload, include_room_filters=True)
-        client = PilotHotelClient()
-        raw = client.search(args, max_pages=max_pages)
-        result = normalize_hotels(raw, args, budget, nights)
-        return apply_room_filters(client, result, args, validated_room_filters)
-    except ReviewSearchError:
-        raise
-    except HotelError as exc:
-        raise ReviewSearchError(
-            _safe_provider_error_message("hotels", exc),
-            "HOTEL_SEARCH_PROVIDER",
-            502,
-            retryable=True,
-            fallback="host_web_search",
-        ) from exc
-    except (ValueError, TypeError) as exc:
-        raise ReviewSearchError(
-            _safe_provider_error_message("hotels", "INPUT_INVALID"),
-            "HOTEL_SEARCH_INVALID",
-        ) from exc
-
-
-def _search_places(source_section: Mapping[str, Any], conditions: Mapping[str, Any]) -> Dict[str, Any]:
-    api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
-    if not api_key:
-        raise ReviewSearchError(
-            "장소 재검색은 GOOGLE_PLACES_API_KEY가 설정된 환경에서 사용할 수 있어요. 현재 후보는 호스트 웹 검색 결과입니다.",
-            "PLACE_SEARCH_REQUIRES_HOST",
-            422,
-        )
-    source_search = _first(source_section, "search", "검색", "검색 설정")
-    source_search = dict(source_search) if isinstance(source_search, Mapping) else {}
-    query = _text(_condition_value(conditions, "query", source_search.get("query") or source_section.get("검색어")))
-    destination = _text(_condition_value(conditions, "destination", source_search.get("destination") or source_section.get("목적지")))
-    if not query:
-        raise ReviewSearchError("장소 검색어를 입력해주세요.", "INPUT_MISSING_PLACE_QUERY")
-    rank = _text(_condition_value(conditions, "rank_preference", source_search.get("rank_preference") or "RELEVANCE")).upper()
-    included_type = _text(_condition_value(conditions, "included_type", source_search.get("included_type") or ""))
-    open_now = conditions.get("open_now", source_search.get("open_now"))
-    if open_now in ("", None):
-        open_now = None
-    try:
-        page = prepare_google_place_candidate_page(
-            query,
-            api_key,
-            destination,
-            page_size=10,
-            language_code=_text(source_search.get("language_code") or "ko"),
-            region_code=_text(source_search.get("region_code") or ""),
-            open_now=open_now,
-            rank_preference=rank or "RELEVANCE",
-            included_type=included_type,
-            location_bias=source_search.get("location_bias") or {},
-            summary_only=bool(source_search.get("summary_only", False)),
-        )
-    except GooglePlacesError as exc:
-        raise ReviewSearchError(
-            _safe_provider_error_message("places", exc),
-            "PLACE_SEARCH_PROVIDER",
-            502,
-        ) from exc
-    except (ValueError, TypeError) as exc:
-        raise ReviewSearchError(
-            _safe_provider_error_message("places", "INPUT_INVALID"),
-            "PLACE_SEARCH_INVALID",
-        ) from exc
-    return {
-        "provider": page.get("검색 제공자") or "Google Places API (New)",
-        "status": "candidates" if page.get("후보") else "no_matches",
-        "searched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "search": {
-            "query": query,
-            "destination": destination,
-            "rank_preference": rank or "RELEVANCE",
-            "included_type": included_type,
-            "open_now": open_now,
-        },
-        "candidates": page.get("후보", []),
-        "rejected_count": 0,
-        "coverage": "provider_returned_results_only",
-        "notion_written": False,
-    }
-
-
-def requery_source_packet(source: Mapping[str, Any], section: str, conditions: Mapping[str, Any]) -> Dict[str, Any]:
-    """Re-run one provider search and return a new source-shaped packet."""
-    canonical = _canonical_section(section)
-    if not canonical:
-        raise ReviewSearchError("지원하지 않는 검색 파트입니다.", "INPUT_UNKNOWN_SECTION")
-    source_section = _section_from_source(source, canonical)
-    if canonical == "flights":
-        result = _search_flights(source_section, conditions)
-    elif canonical == "hotels":
-        result = _search_hotels(source_section, conditions)
-    else:
-        result = _search_places(source_section, conditions)
-    return _replace_source_section(source, canonical, result)
 
 
 def _selection_records(packet: Mapping[str, Any], selected: Sequence[Any]) -> List[Dict[str, str]]:
@@ -875,23 +628,6 @@ class CandidateReviewHTTPServer(ThreadingHTTPServer):
         self.selection_payload: Optional[Dict[str, Any]] = None
         self.state_lock = threading.Lock()
         self.search_lock = threading.Lock()
-
-    def requery(self, section: str, conditions: Mapping[str, Any]) -> Dict[str, Any]:
-        if not self.search_lock.acquire(blocking=False):
-            raise ReviewSearchError("이미 다른 검색을 진행하고 있어요. 잠시 후 다시 시도해주세요.", "SEARCH_IN_PROGRESS", 409)
-        try:
-            updated_source = requery_source_packet(self.source_packet, section, conditions)
-            updated_packet = normalize_packet(updated_source)
-            with self.state_lock:
-                self.source_packet = updated_source
-                self.packet = updated_packet
-                # A new search can invalidate every old candidate ID.  Keep
-                # the same page open but require a fresh explicit selection.
-                self.selection = []
-                self.selection_payload = None
-            return updated_packet
-        finally:
-            self.search_lock.release()
 
     def accept_host_result(
         self,
@@ -1043,7 +779,7 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib signature
         path = urllib.parse.urlsplit(self.path).path
-        if path not in {"/api/selection", "/api/search", "/api/host-result"}:
+        if path not in {"/api/selection", "/api/host-result"}:
             self._send_json({"error": "NOT_FOUND"}, 404)
             return
         try:
@@ -1082,33 +818,6 @@ class CandidateReviewHandler(BaseHTTPRequestHandler):
                 "selection_reset": True,
                 "same_site": True,
                 "source": "host_bridge",
-            })
-            return
-        if path == "/api/search":
-            section = _canonical_section(body.get("section"))
-            conditions = body.get("conditions")
-            if not section or not isinstance(conditions, Mapping):
-                self._send_json({"error": "SEARCH_REQUEST_INVALID", "message": "검색 파트와 조건을 확인해주세요."}, 400)
-                return
-            try:
-                packet = self.server.requery(section, conditions)
-            except ReviewSearchError as exc:
-                payload = {"error": exc.code, "message": str(exc), "retryable": exc.retryable}
-                if exc.fallback:
-                    payload["fallback"] = exc.fallback
-                self._send_json(payload, exc.status)
-                return
-            except Exception:
-                # Provider adapters already sanitize expected errors.  Never
-                # expose a traceback or request payload through this endpoint.
-                self._send_json({"error": "SEARCH_FAILED", "message": "검색을 완료하지 못했어요. 조건을 확인하고 다시 시도해주세요."}, 502)
-                return
-            self._send_json({
-                "status": "results_updated",
-                "section": section,
-                "results": packet,
-                "selection_reset": True,
-                "same_site": True,
             })
             return
         selected = body.get("selected")
