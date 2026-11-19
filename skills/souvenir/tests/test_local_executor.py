@@ -40,6 +40,11 @@ class LocalExecutorTests(unittest.TestCase):
             self.assertEqual(runner.main(["hotels", "--input", "request.json"]), 0)
         hotels.assert_called_once_with(["--input", "request.json"])
 
+    def test_candidate_review_delegates_to_local_web_board(self):
+        with patch("run_souvenir.candidate_review_main", return_value=0) as review:
+            self.assertEqual(runner.main(["candidate-review", "--input", "results.json"]), 0)
+        review.assert_called_once_with(["--input", "results.json"])
+
     def test_template_gate_commands_delegate_to_host_state_machine(self):
         with patch("run_souvenir.template_gate_main", return_value=3) as gate:
             self.assertEqual(runner.main(["template-gate", "plan", "--capability", "manual"]), 3)

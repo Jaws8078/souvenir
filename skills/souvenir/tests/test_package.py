@@ -31,6 +31,9 @@ class PackageTests(unittest.TestCase):
         self.assertTrue((PACKAGE / "scripts" / "run_souvenir.py").is_file())
         self.assertTrue((PACKAGE / "scripts" / "template_gate.py").is_file())
         self.assertTrue((PACKAGE / "scripts" / "coordinator.py").is_file())
+        self.assertTrue((PACKAGE / "scripts" / "candidate_review_web.py").is_file())
+        for asset in ("candidate-review.html", "candidate-review.css", "candidate-review.js"):
+            self.assertTrue((PACKAGE / "web" / asset).is_file())
         self.assertTrue((PACKAGE / "agents" / "openai.yaml").is_file())
         self.assertTrue((PACKAGE / "assets" / "souvenir-icon.png").is_file())
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8"))

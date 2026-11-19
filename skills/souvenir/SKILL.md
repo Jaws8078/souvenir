@@ -99,6 +99,7 @@ Notion 도구를 사용할 때는 해당 도구의 Markdown 규격을 먼저 읽
 - 대화로 여행 계획을 이어갈 때: [대화형 계획 마법사](references/conversation-flow.md). 선택한 파트만 질문하고, 모르는 값은 미정으로 남긴다.
 - 예약 전 항공권을 찾고 비교할 때: [항공 검색](references/flight-search.md). Kiwi 공식 MCP를 우선 사용하고, 로컬 실행기는 `scripts/run_souvenir.py flights --input <JSON>`으로 조회한다. 웹은 조건 보완·오류 시 대체 경로로 사용하고 선택한 후보만 저장한다.
 - 예약 전 숙소를 찾고 비교할 때: [숙소 검색](references/hotel-search.md). Pilot MCP의 `search_hotels`를 우선 사용하고, 로컬 실행기는 `scripts/run_souvenir.py hotels --input <JSON>`으로 모든 접근 가능한 페이지를 읽어 예산 필터 후 후보를 반환한다. `room_filters`를 사용하면 침대 유형·취소 가능 객실을 객실 요금에서 2차 확인한다. 가격은 객실 요금 재확인 전의 예비 자료이며 예약·결제는 실행하지 않는다.
+- 항공권·숙소·장소 후보를 보기 좋게 비교하고 고를 때: [후보 검토 보드](references/candidate-review.md). `scripts/run_souvenir.py candidate-review --input <JSON>`은 터틀넥식 단계형 로컬 화면을 열어 검색 결과를 탭·카드·필터로 보여준다. `선택 제출`은 `선택·예약 전` 검토 JSON만 만들며 Notion 저장·예약·결제는 실행하지 않는다.
 - 실제 입력·저장·표시를 바꿀 때: [간편 입력 규칙](references/input-design.md).
 - 템플릿 연결, 여행·일정·장소·항공·숙소·예약 데이터 작업: [데이터 운영 규칙](references/data-operations.md).
 - 지갑·예산·지출·환산·분담·정산: [금액과 정산](references/finance.md).
