@@ -18,11 +18,17 @@
     "guest_nationality": "KR",
     "limit": 50
   },
-  "budget_per_night_krw": 100000
+  "budget_per_night_krw": 100000,
+  "room_filters": {
+    "bed_type": "트윈",
+    "refundable_only": true
+  }
 }
 ```
 
 `search`에는 Pilot이 지원하는 지역·인원·객실·반경·성급·후기 평점·시설·숙소 유형·AI 검색 필터만 넣는다. 예산은 Pilot 검색 인자가 아니므로 공급자에 넘기지 않고 실행기에서 비교한다. `max_pages`는 로컬 테스트·진단용 선택 필드이며 일반 검색에서는 생략한다.
+
+`room_filters`의 `bed_type`(트윈·더블·싱글·퀸·킹·벙커 또는 공급자가 반환하는 객실명)과 `refundable_only=true`(무료 취소 가능 객실만)는 `search_hotels`에 직접 전달되지 않는다. 예산 후보마다 `get_room_rates_for_hotel`을 읽기 전용으로 호출해 `roomName`·`refundable`을 확인한 뒤, 조건에 맞는 객실이 있는 숙소만 후보에 남긴다. 객실 필터를 쓰면 후보 수에 따라 추가 호출이 발생하며, 객실 요금 통화·세금·최종 취소 마감은 여전히 재확인한다.
 
 실행기는 MCP 초기화 → `search_hotels` 규격 확인 → `next_offset` 페이지 순회 → 중복 숙소 제거 → KRW 예산 필터 순서로 실행한다. `has_more=false`여도 `next_offset`이 있으면 다음 페이지를 계속 읽는다. 빈 페이지·유효하지 않은 다음 offset·안전 상한에 도달하면 멈추고 `pages`와 `pagination_warnings`에 조사 범위를 남긴다. 공급자가 반환한 페이지를 모두 읽었다는 뜻이지 전 세계 숙소 재고를 전부 검증했다는 뜻은 아니다.
 

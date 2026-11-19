@@ -3,7 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 import pilot_hotels as pilot
@@ -121,6 +121,53 @@ class PilotHotelTests(unittest.TestCase):
         self.assertEqual(result["rejected_count"], 2)
         self.assertIn("PRICE_CURRENCY_MISMATCH", result["rejected"][0]["reasons"])
         self.assertIn("INVALID_PRICE", result["rejected"][1]["reasons"])
+
+    def test_room_filters_are_local_and_validate_without_reaching_search_schema(self):
+        payload = search_input()
+        payload["room_filters"] = {"bed_type": "트윈", "refundable_only": True}
+        args, budget, nights, max_pages, room_filters = pilot.validate_input(payload, include_room_filters=True)
+        self.assertEqual(room_filters, {"bed_type": "트윈", "refundable_only": True})
+        self.assertNotIn("room_filters", args)
+        self.assertEqual((budget, nights, max_pages), (100000, 4, 100))
+        for bad in ({"bed_type": ""}, {"refundable_only": "yes"}, {"breakfast": True}):
+            payload = search_input()
+            payload["room_filters"] = bad
+            with self.assertRaises(pilot.HotelError):
+                pilot.validate_input(payload)
+
+    def test_bed_and_refundable_filters_match_room_offers(self):
+        args, budget, nights, _ = pilot.validate_input(search_input())
+        result = pilot.normalize({"hotels": [hotel("Roomy", 300000)]}, args, budget, nights)
+        client = Mock()
+        client.get_room_rates_for_hotel.return_value = {
+            "offers": [
+                {"roomName": "Twin Room - Non-Smoking", "refundable": True, "price": 210, "currency": "USD"},
+                {"roomName": "Double Room", "refundable": False, "price": 190, "currency": "USD"},
+            ]
+        }
+        filtered = pilot.apply_room_filters(
+            client, result, args, {"bed_type": "트윈", "refundable_only": True}
+        )
+        self.assertEqual(filtered["status"], "candidates")
+        self.assertEqual(filtered["candidate_count"], 1)
+        self.assertEqual(filtered["room_filter_status"], "matched")
+        self.assertEqual(filtered["candidates"][0]["room_rate_verification"]["matching_offers"][0]["roomName"], "Twin Room - Non-Smoking")
+        client.get_room_rates_for_hotel.assert_called_once_with(
+            "roomy", check_in="2026-12-19", check_out="2026-12-23", guests=2
+        )
+
+    def test_room_filter_mismatch_is_not_presented_as_candidate(self):
+        args, budget, nights, _ = pilot.validate_input(search_input())
+        result = pilot.normalize({"hotels": [hotel("Roomy", 300000)]}, args, budget, nights)
+        client = Mock()
+        client.get_room_rates_for_hotel.return_value = {
+            "offers": [{"roomName": "Double Room", "refundable": False, "price": 190, "currency": "USD"}]
+        }
+        filtered = pilot.apply_room_filters(client, result, args, {"bed_type": "트윈", "refundable_only": True})
+        self.assertEqual(filtered["status"], "no_matches")
+        self.assertEqual(filtered["candidate_count"], 0)
+        self.assertIn("BED_TYPE_NOT_FOUND", filtered["rejected"][-1]["reasons"])
+        self.assertIn("REFUNDABLE_ROOM_NOT_FOUND", filtered["rejected"][-1]["reasons"])
 
     def test_json_sse_and_rpc_errors_are_sanitized(self):
         message = {"jsonrpc": "2.0", "id": 4, "result": {"tools": []}}

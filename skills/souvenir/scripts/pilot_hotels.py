@@ -84,6 +84,7 @@ class PilotHotelClient:
         self.session = None
         self.protocol = PROTOCOL
         self.sequence = 0
+        self.tools = None
 
     def rpc(self, method, params, notify=False):
         self.sequence += 1
@@ -117,6 +118,8 @@ class PilotHotelClient:
             raise HotelError("PILOT_HOTEL_NETWORK_ERROR") from exc
 
     def _handshake(self):
+        if self.tools is not None:
+            return self.tools
         init = self.rpc(
             "initialize",
             {
@@ -128,7 +131,8 @@ class PilotHotelClient:
         self.protocol = init.get("protocolVersion", PROTOCOL)
         self.rpc("notifications/initialized", {}, notify=True)
         tools = self.rpc("tools/list", {}).get("tools", [])
-        return tools if isinstance(tools, list) else []
+        self.tools = tools if isinstance(tools, list) else []
+        return self.tools
 
     @staticmethod
     def _find_tool(tools, name):
@@ -230,9 +234,28 @@ def _date(value, code):
         raise HotelError(code) from exc
 
 
-def validate_input(payload):
+def _validate_room_filters(value):
+    """Validate local filters that require room-rate offers rather than search_hotels."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - {"bed_type", "refundable_only"}:
+        raise HotelError("INPUT_UNSUPPORTED_ROOM_FILTER")
+    filters = {}
+    if "bed_type" in value:
+        bed_type = value["bed_type"]
+        if not isinstance(bed_type, str) or not bed_type.strip() or len(bed_type.strip()) > 80:
+            raise HotelError("INPUT_INVALID_BED_TYPE")
+        filters["bed_type"] = bed_type.strip()
+    if "refundable_only" in value:
+        if type(value["refundable_only"]) is not bool:
+            raise HotelError("INPUT_INVALID_REFUNDABLE_FILTER")
+        filters["refundable_only"] = value["refundable_only"]
+    return filters
+
+
+def validate_input(payload, include_room_filters=False):
     """Validate the local search contract and return provider args + budget."""
-    if not isinstance(payload, dict) or set(payload) - {"search", "budget_per_night_krw", "max_pages"}:
+    if not isinstance(payload, dict) or set(payload) - {"search", "budget_per_night_krw", "max_pages", "room_filters"}:
         raise HotelError("INPUT_EXPECTED_SEARCH_OBJECT")
     args = payload.get("search")
     if not isinstance(args, dict):
@@ -298,6 +321,9 @@ def validate_input(payload):
     max_pages = payload.get("max_pages", DEFAULT_MAX_PAGES)
     if type(max_pages) is not int or not 1 <= max_pages <= 1000:
         raise HotelError("INPUT_INVALID_MAX_PAGES")
+    room_filters = _validate_room_filters(payload.get("room_filters"))
+    if include_room_filters:
+        return args, budget, nights, max_pages, room_filters
     return args, budget, nights, max_pages
 
 
@@ -386,6 +412,120 @@ def normalize(data, args, budget, nights, pagination_warnings=None, pages=None):
     }
 
 
+_BED_TYPE_ALIASES = {
+    "트윈": ("twin", "two single", "2 single", "2 twin"),
+    "twin": ("twin", "two single", "2 single", "2 twin"),
+    "더블": ("double", "full"),
+    "double": ("double", "full"),
+    "싱글": ("single",),
+    "single": ("single",),
+    "퀸": ("queen",),
+    "queen": ("queen",),
+    "킹": ("king",),
+    "king": ("king",),
+    "벙커": ("bunk",),
+    "bunk": ("bunk",),
+}
+
+
+def _bed_matches(room_name, requested):
+    """Match common Korean/English bed labels against Pilot's roomName."""
+    room_text = _canonical_text(room_name)
+    query = _canonical_text(requested)
+    if not room_text:
+        return False
+    if query in {"침대", "bed", "any", "상관없음", "무관"}:
+        return True
+    tokens = _BED_TYPE_ALIASES.get(query, (query,))
+    return any(token in room_text for token in tokens)
+
+
+def _offer_summary(offer):
+    return {
+        key: offer[key]
+        for key in ("roomName", "board", "refundable", "price", "currency")
+        if key in offer
+    }
+
+
+def apply_room_filters(client, result, args, room_filters):
+    """Filter candidates using read-only room offers from Pilot.
+
+    Bed type and refundability are room-level properties, so they cannot be
+    safely applied to the summary returned by ``search_hotels``.  Only active
+    filters trigger one ``get_room_rates_for_hotel`` call per budget candidate.
+    """
+    room_filters = dict(room_filters or {})
+    active = bool(room_filters.get("bed_type")) or room_filters.get("refundable_only") is True
+    result["room_filters"] = room_filters
+    result["room_filter_applied"] = active
+    if not active:
+        return result
+
+    kept = []
+    rejected = []
+    lookup_errors = []
+    checked_count = 0
+    for candidate in result.get("candidates", []):
+        hotel = candidate.get("hotel", {})
+        hotel_id = hotel.get("id")
+        checked_count += 1
+        if not hotel_id:
+            rejected.append({"id": None, "name": hotel.get("name"), "reasons": ["ROOM_ID_MISSING"]})
+            continue
+        try:
+            rates = client.get_room_rates_for_hotel(
+                hotel_id,
+                check_in=args["check_in"],
+                check_out=args["check_out"],
+                guests=args["guests"],
+            )
+        except HotelError as exc:
+            error = {"id": hotel_id, "name": hotel.get("name"), "error": str(exc)}
+            lookup_errors.append(error)
+            rejected.append({**error, "reasons": ["ROOM_RATE_LOOKUP_ERROR"]})
+            continue
+        offers = rates.get("offers") if isinstance(rates, dict) else None
+        if not isinstance(offers, list):
+            rejected.append({"id": hotel_id, "name": hotel.get("name"), "reasons": ["ROOM_RATE_INVALID_RESPONSE"]})
+            continue
+        matching = []
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            if room_filters.get("refundable_only") is True and offer.get("refundable") is not True:
+                continue
+            if room_filters.get("bed_type") and not _bed_matches(offer.get("roomName"), room_filters["bed_type"]):
+                continue
+            matching.append(_offer_summary(offer))
+        if not matching:
+            reasons = []
+            if room_filters.get("bed_type"):
+                reasons.append("BED_TYPE_NOT_FOUND")
+            if room_filters.get("refundable_only") is True:
+                reasons.append("REFUNDABLE_ROOM_NOT_FOUND")
+            rejected.append({"id": hotel_id, "name": hotel.get("name"), "reasons": reasons or ["ROOM_FILTER_NO_MATCH"]})
+            continue
+        verified = dict(candidate)
+        verified["room_rate_verification"] = {
+            "status": "matched",
+            "returned_offers": len(offers),
+            "matching_offers": matching,
+        }
+        kept.append(verified)
+
+    result["candidates"] = kept
+    result["rejected"].extend(rejected)
+    result["candidate_count"] = len(kept)
+    result["rejected_count"] = len(result["rejected"])
+    result["room_filter_checked_count"] = checked_count
+    result["room_filter_rejected_count"] = len(rejected)
+    result["room_filter_lookup_errors"] = lookup_errors
+    result["room_filter_status"] = "matched" if kept else ("lookup_error" if lookup_errors else "no_matches")
+    result["status"] = "candidates" if kept else "no_matches"
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Read-only Pilot MCP hotel search")
     parser.add_argument("--input", type=Path, required=True, help="JSON containing hotel search arguments")
@@ -393,9 +533,11 @@ def main(argv=None):
     options = parser.parse_args(argv)
     try:
         payload = json.loads(options.input.read_text(encoding="utf-8"))
-        args, budget, nights, max_pages = validate_input(payload)
-        raw = PilotHotelClient().search(args, max_pages=max_pages)
+        args, budget, nights, max_pages, room_filters = validate_input(payload, include_room_filters=True)
+        client = PilotHotelClient()
+        raw = client.search(args, max_pages=max_pages)
         result = normalize(raw, args, budget, nights)
+        result = apply_room_filters(client, result, args, room_filters)
         code = 0
     except (OSError, ValueError, TypeError) as exc:
         result = {
