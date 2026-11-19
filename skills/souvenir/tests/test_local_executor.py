@@ -35,6 +35,11 @@ class LocalExecutorTests(unittest.TestCase):
             self.assertEqual(runner.main(["flights", "--input", "request.json"]), 0)
         flights.assert_called_once_with(["--input", "request.json"])
 
+    def test_hotels_delegate_to_readonly_pilot_client(self):
+        with patch("run_souvenir.hotels_main", return_value=0) as hotels:
+            self.assertEqual(runner.main(["hotels", "--input", "request.json"]), 0)
+        hotels.assert_called_once_with(["--input", "request.json"])
+
     def test_template_gate_commands_delegate_to_host_state_machine(self):
         with patch("run_souvenir.template_gate_main", return_value=3) as gate:
             self.assertEqual(runner.main(["template-gate", "plan", "--capability", "manual"]), 3)

@@ -1,5 +1,6 @@
 # Local compiled artifacts
 /ex
+/ex.cpp
 
 # Local Notion installer state and secrets
 .souvenir-install*.json

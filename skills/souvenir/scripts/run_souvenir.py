@@ -23,12 +23,15 @@ if str(SCRIPT_DIR) not in sys.path:
 from trip_engine import configure_output, main as engine_main  # noqa: E402
 from template_gate import detect_local_notion, main as template_gate_main  # noqa: E402
 from kiwi_flights import main as flights_main  # noqa: E402
+from pilot_hotels import main as hotels_main  # noqa: E402
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "flights":
         return flights_main(args[1:])
+    if args and args[0] == "hotels":
+        return hotels_main(args[1:])
     # Template duplication is a host-facing workflow.  The local process only
     # plans the next action and records host results; CUA/Notion tools perform
     # the actual browser or native duplication outside this Python process.
